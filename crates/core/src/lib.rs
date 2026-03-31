@@ -4,12 +4,14 @@
 //! configuration structs, and error types that the rest of the workspace depends on.
 
 pub mod config;
+pub mod engine;
 pub mod entry;
 pub mod error;
 pub mod traits;
 
 // Re-export primary types at crate root for convenience.
 pub use config::{CoreConfig, EvictionPolicy};
+pub use engine::ContextEngine;
 pub use entry::{ContextEntry, EntryKind, ScoredEntry};
 pub use error::CoreError;
 pub use traits::{ContextStorage, Result, Searcher};
