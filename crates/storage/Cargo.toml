@@ -8,6 +8,3 @@ cf-core = { path = "../core" }
 rusqlite = { workspace = true }
 r2d2 = { workspace = true }
 r2d2_sqlite = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }

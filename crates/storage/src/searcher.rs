@@ -3,10 +3,12 @@ use std::sync::Arc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
-use cf_core::entry::{ContextEntry, EntryKind, ScoredEntry};
+use cf_core::entry::{ContextEntry, ScoredEntry};
 use cf_core::error::CoreError;
 use cf_core::traits::Searcher;
 use cf_core::Result;
+
+use crate::schema::str_to_kind;
 
 /// FTS5-backed full-text search over stored context entries.
 pub struct SqliteSearcher {
@@ -17,16 +19,6 @@ impl SqliteSearcher {
     /// Create a new searcher sharing the given connection pool.
     pub fn new(pool: Arc<Pool<SqliteConnectionManager>>) -> Self {
         Self { pool }
-    }
-}
-
-/// Parse a SQLite text value back into an `EntryKind`.
-fn str_to_kind(s: &str) -> Result<EntryKind> {
-    match s {
-        "Manual" => Ok(EntryKind::Manual),
-        "PreCompact" => Ok(EntryKind::PreCompact),
-        "Auto" => Ok(EntryKind::Auto),
-        other => Err(CoreError::Storage(format!("unknown EntryKind: {other}"))),
     }
 }
 

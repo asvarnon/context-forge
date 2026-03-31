@@ -1,3 +1,4 @@
+use cf_core::entry::EntryKind;
 use cf_core::error::CoreError;
 use cf_core::Result;
 use rusqlite::Connection;
@@ -5,7 +6,26 @@ use rusqlite::Connection;
 const CURRENT_VERSION: i64 = 1;
 
 const CREATE_SCHEMA_VERSION: &str =
-    "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)";
+    "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)";
+
+/// Convert an `EntryKind` to its SQLite text representation.
+pub fn kind_to_str(kind: &EntryKind) -> &'static str {
+    match kind {
+        EntryKind::Manual => "Manual",
+        EntryKind::PreCompact => "PreCompact",
+        EntryKind::Auto => "Auto",
+    }
+}
+
+/// Parse a SQLite text value back into an `EntryKind`.
+pub fn str_to_kind(s: &str) -> Result<EntryKind> {
+    match s {
+        "Manual" => Ok(EntryKind::Manual),
+        "PreCompact" => Ok(EntryKind::PreCompact),
+        "Auto" => Ok(EntryKind::Auto),
+        other => Err(CoreError::Storage(format!("unknown EntryKind: {other}"))),
+    }
+}
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS entries (
@@ -59,16 +79,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V1)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-        if version == 0 {
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?1)",
-                [CURRENT_VERSION],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        } else {
-            conn.execute("UPDATE schema_version SET version = ?1", [CURRENT_VERSION])
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-        }
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, ?1)",
+            [CURRENT_VERSION],
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))?;
     }
 
     Ok(())

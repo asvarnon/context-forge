@@ -5,11 +5,11 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Row;
 
-use cf_core::entry::{ContextEntry, EntryKind};
+use cf_core::entry::ContextEntry;
 use cf_core::error::CoreError;
 use cf_core::traits::ContextStorage;
 
-use crate::schema::migrate;
+use crate::schema::{kind_to_str, migrate, str_to_kind};
 
 #[derive(Debug)]
 struct PragmaCustomizer;
@@ -33,12 +33,21 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     /// Open (or create) a SQLite database at `db_path` and run migrations.
     ///
-    /// Pass `Path::new(":memory:")` for an in-memory database (useful in tests).
+    /// For `":memory:"`, a single-connection pool is used so that all operations
+    /// share the same in-memory database instance.
     pub fn open(db_path: &Path, max_entries: usize) -> cf_core::Result<Self> {
         let manager = SqliteConnectionManager::file(db_path);
-        let pool = Pool::builder()
-            .max_size(4)
-            .connection_customizer(Box::new(PragmaCustomizer))
+        let mut builder = Pool::builder().connection_customizer(Box::new(PragmaCustomizer));
+
+        // Each `:memory:` connection is a distinct in-memory database.
+        // Restrict to a single connection so all callers see the same DB.
+        if db_path == Path::new(":memory:") {
+            builder = builder.max_size(1);
+        } else {
+            builder = builder.max_size(4);
+        }
+
+        let pool = builder
             .build(manager)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
@@ -55,25 +64,6 @@ impl SqliteStorage {
     /// [`SqliteSearcher`](crate::searcher::SqliteSearcher) can share it.
     pub fn pool(&self) -> Arc<Pool<SqliteConnectionManager>> {
         Arc::clone(&self.pool)
-    }
-}
-
-/// Convert an `EntryKind` to its SQLite text representation.
-fn kind_to_str(kind: &EntryKind) -> &'static str {
-    match kind {
-        EntryKind::Manual => "Manual",
-        EntryKind::PreCompact => "PreCompact",
-        EntryKind::Auto => "Auto",
-    }
-}
-
-/// Parse a SQLite text value back into an `EntryKind`.
-fn str_to_kind(s: &str) -> cf_core::Result<EntryKind> {
-    match s {
-        "Manual" => Ok(EntryKind::Manual),
-        "PreCompact" => Ok(EntryKind::PreCompact),
-        "Auto" => Ok(EntryKind::Auto),
-        other => Err(CoreError::Storage(format!("unknown EntryKind: {other}"))),
     }
 }
 
@@ -103,18 +93,29 @@ impl ContextStorage for SqliteStorage {
             .transaction()
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-        // LRU eviction: if at capacity, delete the oldest entry.
-        let current_count: i64 = tx
-            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let current_count = current_count as usize;
-
-        if current_count >= self.max_entries {
-            tx.execute(
-                "DELETE FROM entries WHERE id = (SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
-                [],
+        // LRU eviction: only evict when inserting a new entry (not replacing
+        // an existing ID) and currently at capacity.
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+                [&entry.id],
+                |r| r.get(0),
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        if !exists {
+            let current_count: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+            if current_count as usize >= self.max_entries {
+                tx.execute(
+                    "DELETE FROM entries WHERE id = (\
+                     SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
+                    [],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            }
         }
 
         tx.execute(

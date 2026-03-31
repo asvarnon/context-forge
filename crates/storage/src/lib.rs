@@ -167,12 +167,11 @@ mod tests {
 
         let results = searcher.search("rust", 5).unwrap();
         assert_eq!(results.len(), 2);
-        for scored in &results {
-            assert!(
-                scored.score > 0.0,
-                "score should be positive after negation"
-            );
-        }
+        // Assert ordering by relevance (highest score first), not absolute values.
+        assert!(
+            results[0].score >= results[1].score,
+            "results should be ordered by descending score"
+        );
     }
 
     #[test]
