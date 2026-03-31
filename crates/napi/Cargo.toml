@@ -1,0 +1,16 @@
+[package]
+name = "cf-napi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cf-core = { path = "../core" }
+cf-storage = { path = "../storage" }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
