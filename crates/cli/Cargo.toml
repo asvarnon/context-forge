@@ -1,0 +1,14 @@
+[package]
+name = "cf-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cf"
+path = "src/main.rs"
+
+[dependencies]
+cf-core = { path = "../core" }
+cf-storage = { path = "../storage" }
+clap = { workspace = true }
+serde_json = { workspace = true }
