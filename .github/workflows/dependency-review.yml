@@ -11,6 +11,8 @@ jobs:
   dependency-review:
     name: dependency-review
     runs-on: ubuntu-latest
+    # Informational only — dependency graph API limited on free private repos
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/dependency-review-action@v4
