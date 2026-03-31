@@ -85,7 +85,10 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ContextEntry> {
 
 impl ContextStorage for SqliteStorage {
     fn save(&self, entry: &ContextEntry) -> cf_core::Result<()> {
-        let conn = self.pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         // LRU eviction: if at capacity, delete the oldest entry.
         let current_count: i64 = conn
@@ -117,7 +120,10 @@ impl ContextStorage for SqliteStorage {
     }
 
     fn get_top_k(&self, k: usize) -> cf_core::Result<Vec<ContextEntry>> {
-        let conn = self.pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, content, timestamp, kind, token_count FROM entries ORDER BY timestamp DESC LIMIT ?1")
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -132,7 +138,10 @@ impl ContextStorage for SqliteStorage {
     }
 
     fn get_all(&self) -> cf_core::Result<Vec<ContextEntry>> {
-        let conn = self.pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, content, timestamp, kind, token_count FROM entries ORDER BY timestamp DESC")
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -147,7 +156,10 @@ impl ContextStorage for SqliteStorage {
     }
 
     fn delete(&self, id: &str) -> cf_core::Result<bool> {
-        let conn = self.pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let changes = conn
             .execute("DELETE FROM entries WHERE id = ?1", [id])
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -155,7 +167,10 @@ impl ContextStorage for SqliteStorage {
     }
 
     fn clear(&self) -> cf_core::Result<usize> {
-        let conn = self.pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let changes = conn
             .execute("DELETE FROM entries", [])
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -163,7 +178,10 @@ impl ContextStorage for SqliteStorage {
     }
 
     fn count(&self) -> cf_core::Result<usize> {
-        let conn = self.pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
             .map_err(|e| CoreError::Storage(e.to_string()))?;

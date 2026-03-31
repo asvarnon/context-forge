@@ -129,7 +129,10 @@ mod tests {
 
         let all = storage.get_all().unwrap();
         let ids: Vec<&str> = all.iter().map(|e| e.id.as_str()).collect();
-        assert!(!ids.contains(&"e1"), "oldest entry should have been evicted");
+        assert!(
+            !ids.contains(&"e1"),
+            "oldest entry should have been evicted"
+        );
         assert!(ids.contains(&"e2"));
         assert!(ids.contains(&"e3"));
     }
@@ -195,7 +198,12 @@ mod tests {
     fn test_insert_or_replace() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry("e1", "original content", 100, EntryKind::Manual))
+            .save(&make_entry(
+                "e1",
+                "original content",
+                100,
+                EntryKind::Manual,
+            ))
             .unwrap();
         storage
             .save(&make_entry("e1", "updated content", 200, EntryKind::Auto))

@@ -1,5 +1,5 @@
-use cf_core::Result;
 use cf_core::error::CoreError;
+use cf_core::Result;
 use rusqlite::Connection;
 
 const CURRENT_VERSION: i64 = 1;
@@ -58,8 +58,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         if version == 0 {
-            conn.execute("INSERT INTO schema_version (version) VALUES (?1)", [CURRENT_VERSION])
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                [CURRENT_VERSION],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         } else {
             conn.execute("UPDATE schema_version SET version = ?1", [CURRENT_VERSION])
                 .map_err(|e| CoreError::Storage(e.to_string()))?;

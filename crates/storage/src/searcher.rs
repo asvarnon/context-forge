@@ -32,7 +32,10 @@ fn str_to_kind(s: &str) -> Result<EntryKind> {
 
 impl Searcher for SqliteSearcher {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<ScoredEntry>> {
-        let conn = self.pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         let mut stmt = conn
             .prepare(
