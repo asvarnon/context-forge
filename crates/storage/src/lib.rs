@@ -19,6 +19,7 @@ pub fn open_storage(
 mod tests {
     use std::path::Path;
 
+    use cf_core::engine::MATCH_ALL_QUERY;
     use cf_core::entry::{ContextEntry, EntryKind};
     use cf_core::traits::{ContextStorage, Searcher};
 
@@ -212,5 +213,41 @@ mod tests {
 
         let all = storage.get_all().unwrap();
         assert_eq!(all[0].content, "updated content");
+    }
+
+    #[test]
+    fn test_search_match_all_query() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
+        storage
+            .save(&make_entry("e1", "first entry", 100, EntryKind::Manual))
+            .unwrap();
+        storage
+            .save(&make_entry(
+                "e2",
+                "second entry",
+                200,
+                EntryKind::PreCompact,
+            ))
+            .unwrap();
+        storage
+            .save(&make_entry("e3", "third entry", 300, EntryKind::Auto))
+            .unwrap();
+
+        let results = searcher.search(MATCH_ALL_QUERY, 10).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Ordered by score descending (newest first since score = timestamp)
+        assert_eq!(results[0].entry.id, "e3");
+        assert_eq!(results[1].entry.id, "e2");
+        assert_eq!(results[2].entry.id, "e1");
+
+        // Scores correspond to timestamps
+        assert!((results[0].score - 300.0).abs() < f64::EPSILON);
+        assert!((results[1].score - 200.0).abs() < f64::EPSILON);
+        assert!((results[2].score - 100.0).abs() < f64::EPSILON);
+
+        // Descending score order
+        assert!(results[0].score >= results[1].score);
+        assert!(results[1].score >= results[2].score);
     }
 }

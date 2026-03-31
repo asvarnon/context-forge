@@ -65,6 +65,20 @@ impl SqliteStorage {
     pub fn pool(&self) -> Arc<Pool<SqliteConnectionManager>> {
         Arc::clone(&self.pool)
     }
+
+    /// Return the current schema version from the database.
+    pub fn schema_version(&self) -> cf_core::Result<i64> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))
+    }
 }
 
 /// Map a `rusqlite::Row` (from `SELECT * FROM entries …`) to a `ContextEntry`.
