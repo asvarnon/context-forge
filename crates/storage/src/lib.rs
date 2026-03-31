@@ -222,7 +222,12 @@ mod tests {
             .save(&make_entry("e1", "first entry", 100, EntryKind::Manual))
             .unwrap();
         storage
-            .save(&make_entry("e2", "second entry", 200, EntryKind::PreCompact))
+            .save(&make_entry(
+                "e2",
+                "second entry",
+                200,
+                EntryKind::PreCompact,
+            ))
             .unwrap();
         storage
             .save(&make_entry("e3", "third entry", 300, EntryKind::Auto))
