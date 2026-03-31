@@ -286,6 +286,30 @@ impl Task for GetAllTask {
     }
 }
 
+pub struct CloseTask {
+    storage: Arc<SqliteStorage>,
+}
+
+impl Task for CloseTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let conn = self
+            .storage
+            .pool()
+            .get()
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+        Ok(())
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
 // ── Main napi class ─────────────────────────────────────────────────
 
 #[napi]
@@ -404,14 +428,9 @@ impl ContextForgeCore {
     }
 
     #[napi]
-    pub fn close(&self) -> napi::Result<()> {
-        let conn = self
-            .storage
-            .pool()
-            .get()
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-        Ok(())
+    pub fn close(&self) -> AsyncTask<CloseTask> {
+        AsyncTask::new(CloseTask {
+            storage: Arc::clone(&self.storage),
+        })
     }
 }
