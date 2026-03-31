@@ -22,7 +22,7 @@ impl SqliteSearcher {
         Self { pool }
     }
 
-    /// Return all entries with a uniform score of 1.0, ordered by timestamp descending.
+    /// Return all entries with score derived from timestamp, ordered by timestamp descending.
     ///
     /// This implements the `MATCH_ALL_QUERY` contract without relying on FTS5 MATCH,
     /// which does not support a bare `*` glob.
@@ -62,7 +62,7 @@ impl SqliteSearcher {
                         kind,
                         token_count: token_count.map(|v| v as usize),
                     },
-                    score: 1.0,
+                    score: row.get::<_, i64>(2)? as f64,
                 })
             })
             .map_err(|e| CoreError::Storage(e.to_string()))?

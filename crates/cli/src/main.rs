@@ -97,9 +97,13 @@ fn main() {
             eprintln!("error: {e}");
             process::exit(1);
         }
-        Err(_) => {
+        Err(mpsc::RecvTimeoutError::Timeout) => {
             eprintln!("error: operation timed out");
             process::exit(2);
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            eprintln!("error: worker thread panicked");
+            process::exit(1);
         }
     }
 }
