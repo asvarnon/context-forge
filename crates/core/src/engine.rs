@@ -1,5 +1,6 @@
 //! Core business logic: assembly, scoring, eviction, and snapshot management.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +14,15 @@ const DEFAULT_SEARCH_LIMIT: usize = 50;
 
 /// Half-life for recency decay in seconds (24 hours).
 const RECENCY_HALF_LIFE: f64 = 86_400.0;
+
+/// Well-defined query constant that means "match all entries" in the Searcher trait.
+///
+/// FTS5 interprets `*` as a prefix wildcard that matches every token.
+/// Searcher implementations MUST treat this value as a match-all query.
+pub const MATCH_ALL_QUERY: &str = "*";
+
+/// Monotonic counter for ID uniqueness within the same second.
+static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Estimate token count using whitespace heuristic (1 token ≈ 4 chars).
 pub fn estimate_tokens(text: &str) -> usize {
@@ -143,7 +153,12 @@ impl ContextEngine {
     fn evict_oldest(&self) -> Result<()> {
         let all = self.storage.get_all()?;
         if let Some(oldest) = all.iter().min_by_key(|e| e.timestamp) {
-            self.storage.delete(&oldest.id)?;
+            if !self.storage.delete(&oldest.id)? {
+                return Err(CoreError::Storage(format!(
+                    "eviction failed: entry '{}' was not deleted",
+                    oldest.id
+                )));
+            }
         }
         Ok(())
     }
@@ -153,9 +168,14 @@ impl ContextEngine {
     /// Uses the searcher to retrieve scored results and removes the lowest.
     /// Falls back to LRU if search returns nothing (e.g., FTS5 empty query).
     fn evict_least_relevant(&self) -> Result<()> {
-        let results = self.searcher.search("*", i64::MAX as usize)?;
+        let results = self.searcher.search(MATCH_ALL_QUERY, i64::MAX as usize)?;
         if let Some(lowest) = results.iter().min_by(|a, b| a.score.total_cmp(&b.score)) {
-            self.storage.delete(&lowest.entry.id)?;
+            if !self.storage.delete(&lowest.entry.id)? {
+                return Err(CoreError::Storage(format!(
+                    "eviction failed: entry '{}' was not deleted",
+                    lowest.entry.id
+                )));
+            }
         } else {
             // Fallback to LRU when search returns nothing.
             self.evict_oldest()?;
@@ -164,13 +184,16 @@ impl ContextEngine {
     }
 }
 
-/// Generate a stable, deterministic ID from content and timestamp.
+/// Generate a unique ID from content and timestamp.
 ///
-/// Uses FNV-1a (64-bit) for a process-independent hash — unlike `DefaultHasher`,
-/// this produces the same output across runs and Rust versions.
+/// Uses FNV-1a (64-bit) for a process-independent hash. A per-process
+/// atomic counter is mixed in to prevent collisions when two entries
+/// have identical content and land within the same second.
 fn generate_id(content: &str, timestamp: i64) -> String {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+    let seq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let mut hash = FNV_OFFSET;
     for byte in content.as_bytes() {
@@ -178,6 +201,10 @@ fn generate_id(content: &str, timestamp: i64) -> String {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     for byte in timestamp.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for byte in seq.to_le_bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(FNV_PRIME);
     }
@@ -197,7 +224,6 @@ mod tests {
     use super::*;
     use crate::entry::ScoredEntry;
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     // -----------------------------------------------------------------------
     // Mock implementations
@@ -529,10 +555,11 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_id_deterministic() {
+    fn test_generate_id_unique_even_with_same_inputs() {
+        // Monotonic counter ensures uniqueness even with identical content + timestamp.
         let id1 = generate_id("content", 1_700_000_000);
         let id2 = generate_id("content", 1_700_000_000);
-        assert_eq!(id1, id2);
+        assert_ne!(id1, id2);
 
         // Different content → different id.
         let id3 = generate_id("other", 1_700_000_000);
