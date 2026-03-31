@@ -25,7 +25,7 @@ mod tests {
             id: "e1".into(),
             content: "hello world".into(),
             timestamp: 1_700_000_000,
-            source: "manual".into(),
+            kind: EntryKind::Manual,
             token_count: Some(3),
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -91,7 +91,7 @@ mod tests {
                 id: "s1".into(),
                 content: "search hit".into(),
                 timestamp: 1_700_000_001,
-                source: "auto".into(),
+                kind: EntryKind::Auto,
                 token_count: None,
             },
             score: 0.95,

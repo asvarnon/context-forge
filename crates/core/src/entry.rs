@@ -9,10 +9,10 @@ pub struct ContextEntry {
     pub content: String,
     /// Unix timestamp (seconds) when the entry was created.
     pub timestamp: i64,
-    /// Origin of the entry (e.g. "precompact", "manual", "auto").
-    pub source: String,
+    /// Classification of how this entry was created.
+    pub kind: EntryKind,
     /// Optional pre-computed token count.
-    pub token_count: Option<u32>,
+    pub token_count: Option<usize>,
 }
 
 /// Classification of how an entry was created.
