@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use r2d2::Pool;
+use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Row;
 
@@ -10,6 +10,19 @@ use cf_core::error::CoreError;
 use cf_core::traits::ContextStorage;
 
 use crate::schema::migrate;
+
+#[derive(Debug)]
+struct PragmaCustomizer;
+
+impl CustomizeConnection<rusqlite::Connection, rusqlite::Error> for PragmaCustomizer {
+    fn on_acquire(
+        &self,
+        conn: &mut rusqlite::Connection,
+    ) -> std::result::Result<(), rusqlite::Error> {
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        Ok(())
+    }
+}
 
 /// SQLite-backed implementation of [`ContextStorage`].
 pub struct SqliteStorage {
@@ -25,15 +38,11 @@ impl SqliteStorage {
         let manager = SqliteConnectionManager::file(db_path);
         let pool = Pool::builder()
             .max_size(4)
+            .connection_customizer(Box::new(PragmaCustomizer))
             .build(manager)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         let conn = pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
-
-        // Set PRAGMAs — WAL is ignored on :memory: databases but harmless.
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-
         migrate(&conn)?;
 
         Ok(Self {
@@ -85,26 +94,30 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ContextEntry> {
 
 impl ContextStorage for SqliteStorage {
     fn save(&self, entry: &ContextEntry) -> cf_core::Result<()> {
-        let conn = self
+        let mut conn = self
             .pool
             .get()
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
+        let tx = conn
+            .transaction()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
         // LRU eviction: if at capacity, delete the oldest entry.
-        let current_count: i64 = conn
+        let current_count: i64 = tx
             .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         let current_count = current_count as usize;
 
         if current_count >= self.max_entries {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM entries WHERE id = (SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
                 [],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         }
 
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO entries (id, content, timestamp, kind, token_count) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 entry.id,
@@ -115,6 +128,8 @@ impl ContextStorage for SqliteStorage {
             ],
         )
         .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Ok(())
     }

@@ -12,10 +12,12 @@ CREATE TABLE IF NOT EXISTS entries (
     id          TEXT PRIMARY KEY,
     content     TEXT NOT NULL,
     timestamp   INTEGER NOT NULL,
-    kind        TEXT NOT NULL,
-    token_count INTEGER,
-    created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-);
+    kind        TEXT NOT NULL CHECK(kind IN ('Manual','PreCompact','Auto')),
+    token_count INTEGER CHECK(token_count >= 0),
+    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
     content,
