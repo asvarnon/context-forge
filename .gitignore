@@ -1,0 +1,16 @@
+# Rust
+/target/
+
+# Node
+node_modules/
+out/
+*.node
+
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.vscode/
+*.swp

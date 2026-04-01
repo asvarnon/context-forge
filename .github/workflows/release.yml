@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target.os }})
+    runs-on: ${{ matrix.target.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+          - os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            napi-lib: libcf_napi.so
+            cli-name: cf
+            cli-artifact: cf-linux-x64
+            node-artifact: cf_napi-linux-x64.node
+            vsce-target: linux-x64
+          - os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            napi-lib: cf_napi.dll
+            cli-name: cf.exe
+            cli-artifact: cf-windows-x64.exe
+            node-artifact: cf_napi-windows-x64.node
+            vsce-target: win32-x64
+          - os: macos-latest
+            rust-target: aarch64-apple-darwin
+            napi-lib: libcf_napi.dylib
+            cli-name: cf
+            cli-artifact: cf-darwin-arm64
+            node-artifact: cf_napi-darwin-arm64.node
+            vsce-target: darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target.os }}
+
+      - name: Build CLI (release)
+        run: cargo build -p cf-cli --release --target ${{ matrix.target.rust-target }}
+
+      - name: Build napi (release)
+        run: cargo build -p cf-napi --release --target ${{ matrix.target.rust-target }}
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target.rust-target }}/release/${{ matrix.target.cli-name }} staging/${{ matrix.target.cli-artifact }}
+          cp target/${{ matrix.target.rust-target }}/release/${{ matrix.target.napi-lib }} staging/${{ matrix.target.node-artifact }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build extension
+        working-directory: extension
+        shell: bash
+        run: |
+          npm ci
+          cp ../target/${{ matrix.target.rust-target }}/release/${{ matrix.target.napi-lib }} ./cf_napi.node
+          npx tsc -p ./
+
+      - name: Package VSIX
+        working-directory: extension
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Error: Invalid version '$VERSION'. Expected a semver like 0.1.0"
+            exit 1
+          fi
+          npx @vscode/vsce package --target ${{ matrix.target.vsce-target }} --allow-proposed-api=asvarnon.context-forge -o "../staging/context-forge-${{ matrix.target.vsce-target }}-${VERSION}.vsix"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target.vsce-target }}
+          path: staging/
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: v${{ github.event.inputs.version }}
+          draft: true
+          generate_release_notes: true
+          files: release-assets/*
