@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "cf-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cf-core",
  "cf-storage",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "cf-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "cf-napi"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cf-core",
  "cf-storage",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "cf-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cf-core",
  "r2d2",

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - 2026-04-01
+
+### Bug Fixes
+
+- *(ci)* Harden release pipeline and install scripts ([08ddeb4](https://github.com/asvarnon/context-forge/commit/08ddeb4ff2d17a9fb93b2026694a9f70a63c083c))
+
 ## [0.2.1] - 2026-04-01
 
 ### Bug Fixes
@@ -13,6 +19,7 @@ All notable changes to this project will be documented in this file.
 
 - Sync Cargo.lock with v0.2.0 ([fec9f4d](https://github.com/asvarnon/context-forge/commit/fec9f4d72ca7e0e6ef05a5489ff31a73974c6d20))
 - Switch from release-please to cargo-release + git-cliff ([4d629f1](https://github.com/asvarnon/context-forge/commit/4d629f10346fd9b095b1e0028083f3ce70545a6e))
+- Release v0.2.1 ([bfd20bd](https://github.com/asvarnon/context-forge/commit/bfd20bd408dbc49cf84863df79a26d06bf23d606))
 
 ## [0.2.0] - 2026-04-01
 
