@@ -8,16 +8,24 @@ Context Forge is a **passthrough storage engine** — it does not summarize, com
 
 ### `cf pre-compact` (PreCompact Hook)
 
-Claude Code fires this **before** compaction, piping the full conversation transcript to stdin.
+Claude Code fires this **before** compaction, piping a JSON metadata payload to stdin containing a `transcript_path` field that points to the session's JSONL transcript file.
 
-1. Read stdin verbatim
-2. Trim whitespace
-3. Generate ID via FNV-1a hash of `content + timestamp`
-4. Store as-is with `kind=PreCompact`
+1. Read stdin, parse as JSON
+2. Extract `transcript_path` from the metadata
+3. Read the JSONL transcript file at that path
+4. Convert JSONL turns into BM25-friendly plain text (see below)
+5. Generate ID via FNV-1a hash of `content + timestamp`
+6. Store formatted transcript with `kind=PreCompact`
 
-No compression, no summarization, no transformation.
+**Backward compatibility:** If stdin is not JSON, or JSON without `transcript_path`, stores stdin verbatim (supports shell wrapper scripts that pipe transcript content directly).
 
-**Code:** `cmd_pre_compact()` in `crates/cli/src/main.rs`
+**JSONL → Plain Text Conversion** (`crates/cli/src/transcript.rs`):
+- Filters for `user` and `assistant` turn types only (drops `system`, `file-history-snapshot`, `queue-operation`, `last-prompt`)
+- Formats content blocks: `text` → plain text, `thinking` → reasoning text (drops encrypted `signature`), `tool_use` → tool name + compact JSON input, `tool_result` → tool output text
+- Tool results are preserved — they contain the most valuable recoverable context (file contents, command outputs, search results)
+- Malformed JSONL lines are skipped with a stderr warning
+
+**Code:** `cmd_pre_compact()` in `crates/cli/src/main.rs`, `transcript::read_transcript()` in `crates/cli/src/transcript.rs`
 
 ### `cf save --kind auto` (PostCompact Hook)
 
