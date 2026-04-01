@@ -7,6 +7,5 @@
   "force-tag-creation": true,
   "packages": {
     ".": {}
-  },
-  "plugins": ["cargo-workspace"]
+  }
 }
