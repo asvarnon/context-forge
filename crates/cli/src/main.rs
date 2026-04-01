@@ -21,6 +21,16 @@ const DEFAULT_TOKEN_BUDGET: usize = 4096;
 /// Default timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 
+/// Return the default database path: `~/.context-forge/context.db`.
+fn default_db_path() -> PathBuf {
+    let base_dir = dirs::home_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(std::env::temp_dir);
+
+    base_dir.join(".context-forge").join("context.db")
+}
+
 /// context-forge CLI — manage the persistent context store.
 #[derive(Parser)]
 #[command(name = "cf", version, about)]
@@ -40,13 +50,43 @@ enum OutputFormat {
     Text,
 }
 
+/// Entry kind selectable from the CLI.
+#[derive(Clone, ValueEnum)]
+enum CliEntryKind {
+    Auto,
+    Manual,
+    PreCompact,
+}
+
+impl From<CliEntryKind> for EntryKind {
+    fn from(k: CliEntryKind) -> Self {
+        match k {
+            CliEntryKind::Auto => EntryKind::Auto,
+            CliEntryKind::Manual => EntryKind::Manual,
+            CliEntryKind::PreCompact => EntryKind::PreCompact,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Read context from stdin and save a pre-compact snapshot.
     PreCompact {
         /// Path to the SQLite database file.
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_db_path())]
         db: PathBuf,
+        /// Maximum number of entries to retain.
+        #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
+        max_entries: usize,
+    },
+    /// Save context from stdin (supports Claude Code PostCompact JSON).
+    Save {
+        /// Path to the SQLite database file.
+        #[arg(long, default_value_os_t = default_db_path())]
+        db: PathBuf,
+        /// Entry kind to store.
+        #[arg(long, default_value = "auto")]
+        kind: CliEntryKind,
         /// Maximum number of entries to retain.
         #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
         max_entries: usize,
@@ -54,10 +94,10 @@ enum Command {
     /// Query context entries from the store.
     Query {
         /// Path to the SQLite database file.
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_db_path())]
         db: PathBuf,
         /// Number of entries to return.
-        #[arg(long)]
+        #[arg(long, default_value_t = 10)]
         top_k: usize,
         /// Token budget for assembly.
         #[arg(long, default_value_t = DEFAULT_TOKEN_BUDGET)]
@@ -69,13 +109,13 @@ enum Command {
     /// Delete all entries from the store.
     Clear {
         /// Path to the SQLite database file.
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_db_path())]
         db: PathBuf,
     },
     /// Print diagnostics about the store.
     Info {
         /// Path to the SQLite database file.
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_db_path())]
         db: PathBuf,
     },
 }
@@ -111,6 +151,11 @@ fn main() {
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::PreCompact { db, max_entries } => cmd_pre_compact(&db, max_entries),
+        Command::Save {
+            db,
+            kind,
+            max_entries,
+        } => cmd_save(&db, kind.into(), max_entries),
         Command::Query {
             db,
             top_k,
@@ -133,9 +178,48 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
         return Err("stdin was empty; nothing to save".into());
     }
 
+    ensure_db_dir(db)?;
     let engine = make_engine(db, max_entries, DEFAULT_TOKEN_BUDGET)?;
     let id = engine
         .save_snapshot(content, EntryKind::PreCompact)
+        .map_err(|e| e.to_string())?;
+
+    println!("{id}");
+    Ok(())
+}
+
+/// Save context from stdin. If the input is JSON with a `compact_summary` field
+/// (Claude Code PostCompact payload), extract that field. Otherwise save the raw text.
+fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| format!("failed to read stdin: {e}"))?;
+
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("stdin was empty; nothing to save".into());
+    }
+
+    // Try to extract compact_summary from Claude Code PostCompact JSON.
+    let content = if let Ok(obj) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(summary) = obj.get("compact_summary").and_then(|v| v.as_str()) {
+            summary.to_owned()
+        } else {
+            trimmed.to_owned()
+        }
+    } else {
+        trimmed.to_owned()
+    };
+
+    if content.is_empty() {
+        return Err("extracted content was empty; nothing to save".into());
+    }
+
+    ensure_db_dir(db)?;
+    let engine = make_engine(db, max_entries, DEFAULT_TOKEN_BUDGET)?;
+    let id = engine
+        .save_snapshot(&content, kind)
         .map_err(|e| e.to_string())?;
 
     println!("{id}");
@@ -148,6 +232,7 @@ fn cmd_query(
     token_budget: usize,
     format: &OutputFormat,
 ) -> Result<(), String> {
+    ensure_db_dir(db)?;
     let engine = make_engine(db, DEFAULT_MAX_ENTRIES, token_budget)?;
     let mut entries = engine
         .assemble(MATCH_ALL_QUERY, token_budget)
@@ -171,6 +256,7 @@ fn cmd_query(
 }
 
 fn cmd_clear(db: &Path) -> Result<(), String> {
+    ensure_db_dir(db)?;
     let (storage, _) = open_storage(db, DEFAULT_MAX_ENTRIES).map_err(|e| e.to_string())?;
     let n = storage.clear().map_err(|e| e.to_string())?;
     println!("Cleared {n} entries");
@@ -178,6 +264,7 @@ fn cmd_clear(db: &Path) -> Result<(), String> {
 }
 
 fn cmd_info(db: &Path) -> Result<(), String> {
+    ensure_db_dir(db)?;
     let (storage, _) = open_storage(db, DEFAULT_MAX_ENTRIES).map_err(|e| e.to_string())?;
     let count = storage.count().map_err(|e| e.to_string())?;
     let version = storage.schema_version().map_err(|e| e.to_string())?;
@@ -190,6 +277,17 @@ fn cmd_info(db: &Path) -> Result<(), String> {
     println!("schema:   v{version}");
     println!("db size:  {size} bytes");
     println!("db path:  {}", db.display());
+    Ok(())
+}
+
+/// Ensure the parent directory of the database file exists.
+fn ensure_db_dir(db: &Path) -> Result<(), String> {
+    if let Some(parent) = db.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create db directory {}: {e}", parent.display()))?;
+        }
+    }
     Ok(())
 }
 

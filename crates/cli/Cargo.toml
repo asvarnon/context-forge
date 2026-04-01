@@ -11,4 +11,5 @@ path = "src/main.rs"
 cf-core = { path = "../core" }
 cf-storage = { path = "../storage" }
 clap = { workspace = true }
+dirs = "5"
 serde_json = { workspace = true }
