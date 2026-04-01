@@ -4,6 +4,7 @@
 # Node
 node_modules/
 out/
+*.node
 
 # SQLite
 *.db
