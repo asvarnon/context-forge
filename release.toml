@@ -23,6 +23,5 @@ pre-release-commit-message = "chore: release v{{version}}"
 # Push to origin
 push-remote = "origin"
 
-# Generate changelog via git-cliff before committing
-# Use --workdir so git-cliff runs from workspace root (hook runs per-crate otherwise)
-pre-release-hook = ["git-cliff", "--workdir", "{{workspace_root}}", "--output", "CHANGELOG.md", "--tag", "v{{version}}"]
+# Changelog generation is in crates/cli/release.toml (runs once, not per-crate)
+# See: https://github.com/crate-ci/cargo-release/blob/master/docs/faq.md#how-do-i-apply-a-setting-only-to-one-crate-in-my-workspace

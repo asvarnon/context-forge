@@ -1,0 +1,6 @@
+# Per-crate cargo-release config for cf-cli
+# This crate is the "representative" — runs changelog hook once for the workspace.
+# See: https://github.com/crate-ci/cargo-release/blob/master/docs/faq.md
+
+# ../.. resolves to workspace root from crates/cli/
+pre-release-hook = ["git-cliff", "--repository", "../..", "--output", "../../CHANGELOG.md", "--tag", "v{{version}}"]
