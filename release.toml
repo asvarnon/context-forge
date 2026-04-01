@@ -24,4 +24,5 @@ pre-release-commit-message = "chore: release v{{version}}"
 push-remote = "origin"
 
 # Generate changelog via git-cliff before committing
-pre-release-hook = ["git-cliff", "--output", "CHANGELOG.md", "--tag", "v{{version}}"]
+# Use --workdir so git-cliff runs from workspace root (hook runs per-crate otherwise)
+pre-release-hook = ["git-cliff", "--workdir", "{{workspace_root}}", "--output", "CHANGELOG.md", "--tag", "v{{version}}"]
