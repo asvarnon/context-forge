@@ -4,6 +4,10 @@
   "description": "Compaction-aware persistent memory for AI coding agents",
   "version": "0.1.0",
   "publisher": "asvarnon",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/asvarnon/context-forge"
+  },
   "engines": {
     "vscode": "^1.109.0"
   },

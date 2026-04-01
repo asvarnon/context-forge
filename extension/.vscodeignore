@@ -1,0 +1,12 @@
+.vscode/**
+src/**
+node_modules/**
+!node_modules/@types/**
+*.ts
+!out/**
+tsconfig.json
+**/*.map
+.gitignore
+vscode.proposed.*.d.ts
+docs/**
+scripts/**
