@@ -13,12 +13,10 @@ pub fn read_transcript(path: &Path) -> Result<String, String> {
         if trimmed.is_empty() {
             continue;
         }
-        match format_turn(trimmed) {
+        match format_turn(trimmed, i + 1) {
             Some(text) => turns.push(text),
             None => { /* filtered out or skipped */ }
         }
-        // Malformed lines are logged inside format_turn; we continue either way.
-        let _ = i; // suppress unused warning placeholder
     }
 
     if turns.is_empty() {
@@ -29,11 +27,11 @@ pub fn read_transcript(path: &Path) -> Result<String, String> {
 }
 
 /// Parse a single JSONL line and return formatted text, or None if filtered out.
-fn format_turn(line: &str) -> Option<String> {
+fn format_turn(line: &str, line_number: usize) -> Option<String> {
     let obj: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("skipping malformed JSONL line: {e}");
+            eprintln!("skipping malformed JSONL line {line_number}: {e}");
             return None;
         }
     };

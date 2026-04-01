@@ -185,11 +185,17 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
     // Otherwise, fall back to storing stdin verbatim (backward compat).
     let content = if let Ok(obj) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(path_str) = obj.get("transcript_path").and_then(|v| v.as_str()) {
-            let path = Path::new(path_str);
-            if !path.exists() {
-                return Err(format!("transcript file not found: {}", path.display()));
+            let path_str = path_str.trim();
+            if path_str.is_empty() {
+                // Empty/whitespace-only transcript_path: treat as missing, fall back to stdin.
+                trimmed.to_owned()
+            } else {
+                let path = Path::new(path_str);
+                if !path.exists() {
+                    return Err(format!("transcript file not found: {}", path.display()));
+                }
+                transcript::read_transcript(path)?
             }
-            transcript::read_transcript(path)?
         } else {
             trimmed.to_owned()
         }
