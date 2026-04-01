@@ -9,7 +9,6 @@
   },
   "categories": ["Other"],
   "enabledApiProposals": [
-    "chatHooks",
     "chatContextProvider"
   ],
   "activationEvents": [
@@ -29,13 +28,14 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "build:native": "cargo build -p cf-napi --manifest-path ../Cargo.toml && node -e \"const p=process.platform,f=p==='win32'?'cf_napi.dll':p==='darwin'?'libcf_napi.dylib':'libcf_napi.so';require('fs').copyFileSync('../target/debug/'+f,'./cf_napi.node')\"",
+    "compile": "npm run build:native && tsc -p ./",
     "watch": "tsc -watch -p ./",
     "postinstall": "npx @vscode/dts dev"
   },
   "devDependencies": {
-    "typescript": "^5.8.3",
     "@types/node": "20.x",
-    "@types/vscode": "^1.108.0"
+    "@types/vscode": "^1.109.0",
+    "typescript": "^5.8.3"
   }
 }
