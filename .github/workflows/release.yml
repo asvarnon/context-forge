@@ -84,7 +84,7 @@ jobs:
             echo "Error: Invalid version '$VERSION'. Expected a semver like 0.1.0"
             exit 1
           fi
-          npx @vscode/vsce package --target ${{ matrix.target.vsce-target }} --allow-proposed-api=asvarnon.context-forge -o "../staging/context-forge-${{ matrix.target.vsce-target }}-${VERSION}.vsix"
+          npx @vscode/vsce package --target ${{ matrix.target.vsce-target }} -o "../staging/context-forge-${{ matrix.target.vsce-target }}-${VERSION}.vsix"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
