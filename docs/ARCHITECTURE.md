@@ -89,7 +89,7 @@ The PostCompact entry stores Claude's own `compact_summary` — which IS a summa
 DEFAULT_SEARCH_LIMIT: usize = 100;
 RECENCY_HALF_LIFE: f64 = 86400.0;  // 24 hours
 DEFAULT_MAX_ENTRIES: usize = 1000;
-DEFAULT_TOKEN_BUDGET: usize = 8000;
+DEFAULT_TOKEN_BUDGET: usize = 16000;
 ```
 
 ## Storage Layer

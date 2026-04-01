@@ -18,7 +18,7 @@ mod transcript;
 const DEFAULT_MAX_ENTRIES: usize = 100;
 
 /// Default token budget for assembly.
-const DEFAULT_TOKEN_BUDGET: usize = 4096;
+const DEFAULT_TOKEN_BUDGET: usize = 16_000;
 
 /// Default timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 5000;

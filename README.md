@@ -116,6 +116,27 @@ context-forge/
 └── README.md
 ```
 
+## CLI Reference
+
+```
+cf pre-compact          Snapshot conversation transcript (reads stdin)
+cf save [--kind auto]   Store a context entry (reads stdin)
+cf query                Assemble and output context
+cf clear                Delete all entries
+cf info                 Print database diagnostics
+```
+
+**Common flags for `cf query`:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--token-budget` | 16000 | Max tokens to assemble. Increase for richer context |
+| `--top-k` | 10 | Max entries to consider |
+| `--format` | json | Output format: `json` or `text` |
+| `--db` | `~/.context-forge/context.db` | Database path |
+
+All subcommands support `--help` for full usage.
+
 ## Related Repos
 
 | Repo | Purpose |

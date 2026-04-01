@@ -109,6 +109,22 @@ cf query --format text --top-k 5
 cf clear
 ```
 
+## Token Budget
+
+The `cf query` command assembles context entries into a token budget — the maximum number of tokens to return. Entries are ranked by BM25 relevance and recency, then greedily packed until the budget is exhausted.
+
+The default budget is **16,000 tokens**. To increase it:
+
+```bash
+# In your hook config
+"command": "cf query --format text --top-k 10 --token-budget 32000"
+
+# Or manually
+cf query --format text --token-budget 32000
+```
+
+Larger budgets retrieve more context but consume more of Claude's context window. A budget of 16,000–32,000 tokens works well for most workflows.
+
 ## Custom Database Path
 
 All subcommands accept `--db <path>` to use a different database:
