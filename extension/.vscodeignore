@@ -1,7 +1,6 @@
 .vscode/**
 src/**
 node_modules/**
-!node_modules/@types/**
 *.ts
 !out/**
 tsconfig.json
@@ -10,3 +9,8 @@ tsconfig.json
 vscode.proposed.*.d.ts
 docs/**
 scripts/**
+.env
+.env.*
+*.key
+*.pem
+*.secret

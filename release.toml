@@ -10,8 +10,6 @@ consolidate-commits = true
 
 # We don't publish to crates.io
 publish = false
-# Skip cargo verification (we have CI for that)
-verify = false
 
 # Tag format: v0.2.0 (no crate prefix)
 tag-name = "v{{version}}"

@@ -5,9 +5,6 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 env:
   CARGO_TERM_COLOR: always
 
@@ -15,6 +12,8 @@ jobs:
   build:
     name: Build (${{ matrix.target.os }})
     runs-on: ${{ matrix.target.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
@@ -41,9 +40,9 @@ jobs:
             node-artifact: cf_napi-darwin-arm64.node
             vsce-target: darwin-arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: release-${{ matrix.target.os }}
 
@@ -60,7 +59,7 @@ jobs:
           cp target/${{ matrix.target.rust-target }}/release/${{ matrix.target.cli-name }} staging/${{ matrix.target.cli-artifact }}
           cp target/${{ matrix.target.rust-target }}/release/${{ matrix.target.napi-lib }} staging/${{ matrix.target.node-artifact }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
 
@@ -84,7 +83,7 @@ jobs:
           npx @vscode/vsce package --target ${{ matrix.target.vsce-target }} -o "../staging/context-forge-${{ matrix.target.vsce-target }}-${VERSION}.vsix"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target.vsce-target }}
           path: staging/
@@ -93,20 +92,34 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify tag is on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor ${{ github.sha }} origin/main \
+            || (echo "::error::Tag is not on the main branch — aborting release" && exit 1)
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > checksums.sha256
+          cat checksums.sha256
 
       - name: List artifacts
         run: ls -la release-assets/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}

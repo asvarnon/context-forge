@@ -148,6 +148,52 @@ try {
 }
 
 # ============================================================================
+#  Verify checksum
+# ============================================================================
+
+$ChecksumFile = "checksums.sha256"
+$ChecksumPath = Join-Path $TmpDir $ChecksumFile
+Write-Info "Downloading checksums for integrity verification..."
+
+try {
+    if ($HasGh) {
+        $ghArgs = @("release", "download", $Version,
+                     "--repo", $Repo,
+                     "--pattern", $ChecksumFile,
+                     "--dir", $TmpDir,
+                     "--clobber")
+        & gh @ghArgs 2>$null
+    } else {
+        $asset = $release.assets | Where-Object { $_.name -eq $ChecksumFile } | Select-Object -First 1
+        if ($null -ne $asset) {
+            $dlHeaders = @{
+                "Authorization" = "token $env:GITHUB_TOKEN"
+                "Accept"        = "application/octet-stream"
+            }
+            Invoke-WebRequest -Uri $asset.url -Headers $dlHeaders -OutFile $ChecksumPath
+        }
+    }
+} catch {
+    # Silently continue — checksum file may not exist in older releases
+}
+
+if (Test-Path $ChecksumPath) {
+    $expectedLine = Get-Content $ChecksumPath | Where-Object { $_ -match $AssetName } | Select-Object -First 1
+    if ($expectedLine) {
+        $expected = ($expectedLine -split '\s+')[0]
+        $actual = (Get-FileHash -Path $TmpFile -Algorithm SHA256).Hash.ToLower()
+        if ($expected -ne $actual) {
+            Remove-Item -Path $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Err "Checksum verification FAILED. Binary may be corrupted or tampered with.`n  Expected: $expected`n  Got:      $actual"
+        }
+        Write-Ok "Checksum verified (SHA-256)"
+    }
+} else {
+    Write-Warn "No checksums.sha256 found in release $Version - skipping integrity check."
+    Write-Warn "Releases from v0.3.0+ include checksums. Consider upgrading."
+}
+
+# ============================================================================
 #  Install binary
 # ============================================================================
 

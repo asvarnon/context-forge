@@ -126,6 +126,43 @@ fi
 chmod +x "${TMPFILE}"
 ok "Downloaded ${ASSET_NAME}"
 
+# --- Verify checksum --------------------------------------------------------
+
+CHECKSUM_FILE="checksums.sha256"
+info "Downloading checksums for integrity verification..."
+
+if command -v gh &>/dev/null; then
+    gh release download "${VERSION}" \
+        --repo "${REPO}" \
+        --pattern "${CHECKSUM_FILE}" \
+        --dir "${TMPDIR}" \
+        --clobber 2>/dev/null
+else
+    CHECKSUM_URL="$(echo "${RELEASE_DATA}" \
+        | grep -o "\"url\": *\"[^\"]*${CHECKSUM_FILE}[^\"]*\"" \
+        | head -1 | cut -d'"' -f4)"
+
+    if [[ -n "${CHECKSUM_URL}" ]]; then
+        curl -fsSL \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -o "${TMPDIR}/${CHECKSUM_FILE}" \
+            "${CHECKSUM_URL}" 2>/dev/null
+    fi
+fi
+
+if [[ -f "${TMPDIR}/${CHECKSUM_FILE}" ]]; then
+    EXPECTED="$(grep "${ASSET_NAME}" "${TMPDIR}/${CHECKSUM_FILE}" | awk '{print $1}')"
+    ACTUAL="$(sha256sum "${TMPFILE}" | awk '{print $1}')"
+    if [[ "${EXPECTED}" != "${ACTUAL}" ]]; then
+        error "Checksum verification FAILED. Binary may be corrupted or tampered with.\n  Expected: ${EXPECTED}\n  Got:      ${ACTUAL}"
+    fi
+    ok "Checksum verified (SHA-256)"
+else
+    warn "No checksums.sha256 found in release ${VERSION} — skipping integrity check."
+    warn "Releases from v0.3.0+ include checksums. Consider upgrading."
+fi
+
 # --- Install binary ---------------------------------------------------------
 
 if [[ -w "/usr/local/bin" ]]; then

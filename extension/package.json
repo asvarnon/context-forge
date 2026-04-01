@@ -34,8 +34,7 @@
   "scripts": {
     "build:native": "cargo build -p cf-napi --manifest-path ../Cargo.toml && node -e \"const p=process.platform,f=p==='win32'?'cf_napi.dll':p==='darwin'?'libcf_napi.dylib':'libcf_napi.so';require('fs').copyFileSync('../target/debug/'+f,'./cf_napi.node')\"",
     "compile": "npm run build:native && tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "postinstall": "npx @vscode/dts dev"
+    "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
     "@types/node": "20.x",
