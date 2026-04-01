@@ -11,7 +11,8 @@ export function registerSaveCommand(
         'context-forge.saveContext',
         async (args?: { content?: string; kind?: string }) => {
             const content = args?.content ?? `Context snapshot at ${new Date().toISOString()}`;
-            const kind = args?.kind ?? 'manual';
+            const validKinds: ReadonlySet<string> = new Set(['manual', 'pre_compact', 'auto']);
+            const kind = args?.kind && validKinds.has(args.kind) ? args.kind : 'manual';
 
             try {
                 const id = await core.save(content, kind);
