@@ -139,4 +139,4 @@ All subcommands accept `--db <path>` to use a different database:
 | Empty context on session start | Run `cf info` to check entry count; run `cf query --format text` manually |
 | Permission denied | Check file permissions on `~/.context-forge/` |
 | Hooks not firing | Verify `~/.claude/settings.json` is valid JSON; check Claude Code logs |
-| Timeout errors | Increase `timeout` in hook config (default 10000ms) or use `cf --timeout-ms 15000` |
+| Timeout errors | Increase `timeout` in hook config (default 10000ms) or use `cf query --timeout-ms 15000 --format text` |

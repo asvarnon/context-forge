@@ -23,10 +23,12 @@ const DEFAULT_TIMEOUT_MS: u64 = 5000;
 
 /// Return the default database path: `~/.context-forge/context.db`.
 fn default_db_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".context-forge")
-        .join("context.db")
+    let base_dir = dirs::home_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(std::env::temp_dir);
+
+    base_dir.join(".context-forge").join("context.db")
 }
 
 /// context-forge CLI — manage the persistent context store.
