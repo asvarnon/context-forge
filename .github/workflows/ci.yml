@@ -67,3 +67,28 @@ jobs:
       - name: Lint
         run: npx eslint .
         if: hashFiles('extension/package-lock.json') != '' && hashFiles('extension/.eslintrc*', 'extension/eslint.config.*') != ''
+
+  napi-build:
+    name: napi build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            lib-name: libcf_napi.so
+          - os: windows-latest
+            lib-name: cf_napi.dll
+          - os: macos-latest
+            lib-name: libcf_napi.dylib
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: napi-${{ matrix.os }}
+      - name: Build napi module
+        run: cargo build -p cf-napi
+      - name: Verify artifact exists
+        shell: bash
+        run: test -f target/debug/${{ matrix.lib-name }}
