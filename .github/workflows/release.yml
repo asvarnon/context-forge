@@ -51,17 +51,17 @@ jobs:
           key: release-${{ matrix.target.os }}
 
       - name: Build CLI (release)
-        run: cargo build -p cf-cli --release
+        run: cargo build -p cf-cli --release --target ${{ matrix.target.rust-target }}
 
       - name: Build napi (release)
-        run: cargo build -p cf-napi --release
+        run: cargo build -p cf-napi --release --target ${{ matrix.target.rust-target }}
 
       - name: Prepare artifacts
         shell: bash
         run: |
           mkdir -p staging
-          cp target/release/${{ matrix.target.cli-name }} staging/${{ matrix.target.cli-artifact }}
-          cp target/release/${{ matrix.target.napi-lib }} staging/${{ matrix.target.node-artifact }}
+          cp target/${{ matrix.target.rust-target }}/release/${{ matrix.target.cli-name }} staging/${{ matrix.target.cli-artifact }}
+          cp target/${{ matrix.target.rust-target }}/release/${{ matrix.target.napi-lib }} staging/${{ matrix.target.node-artifact }}
 
       - uses: actions/setup-node@v4
         with:
@@ -72,14 +72,19 @@ jobs:
         shell: bash
         run: |
           npm ci
-          cp ../target/release/${{ matrix.target.napi-lib }} ./cf_napi.node
+          cp ../target/${{ matrix.target.rust-target }}/release/${{ matrix.target.napi-lib }} ./cf_napi.node
           npx tsc -p ./
 
       - name: Package VSIX
         working-directory: extension
         shell: bash
         run: |
-          npx @vscode/vsce package --target ${{ matrix.target.vsce-target }} --allow-proposed-api=asvarnon.context-forge -o ../staging/context-forge-${{ matrix.target.vsce-target }}-${{ github.event.inputs.version }}.vsix
+          VERSION="${{ github.event.inputs.version }}"
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Error: Invalid version '$VERSION'. Expected a semver like 0.1.0"
+            exit 1
+          fi
+          npx @vscode/vsce package --target ${{ matrix.target.vsce-target }} --allow-proposed-api=asvarnon.context-forge -o "../staging/context-forge-${{ matrix.target.vsce-target }}-${VERSION}.vsix"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
