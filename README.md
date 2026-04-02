@@ -162,7 +162,7 @@ top_k = 10
 recency_half_life_hours = 72.0
 ```
 
-CLI flags override config file values, which override compile-time defaults.
+For `token_budget` and `top_k`, CLI flags override config file values, which override compile-time defaults. `recency_half_life_hours` is read only from the config file (or falls back to the compile-time default if not set).
 
 ## Related Repos
 

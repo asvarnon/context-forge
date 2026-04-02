@@ -83,7 +83,7 @@ The PostCompact entry stores Claude's own `compact_summary` — which IS a summa
 **`recency_decay(age_seconds, half_life)`**
 - Exponential decay: `0.5^(age / half_life)`
 - Default half-life: 72 hours (259200 seconds)
-- Configurable via `CoreConfig.recency_half_life_secs` (set from config file or CLI)
+- Configurable via `CoreConfig.recency_half_life_secs` (set from config file)
 - Recent entries score higher; old entries fade but never reach zero
 
 ### Constants
@@ -92,7 +92,9 @@ The PostCompact entry stores Claude's own `compact_summary` — which IS a summa
 DEFAULT_SEARCH_LIMIT: usize = 50;
 DEFAULT_RECENCY_HALF_LIFE_HOURS: f64 = 72.0;  // in config.rs, converted to seconds at call sites
 DEFAULT_RECENCY_HALF_LIFE_SECS: f64 = 259200.0;  // computed from HOURS * 3600.0 in config.rs
-DEFAULT_MAX_ENTRIES: usize = 1000;
+// Per-frontend defaults for max entries:
+// - CLI: 100 (see crates/cli/src/main.rs)
+// - napi (Node bindings): 1000 (constructor default)
 DEFAULT_TOKEN_BUDGET: usize = 16000;
 ```
 

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{CoreConfig, EvictionPolicy};
+use crate::config::{CoreConfig, EvictionPolicy, DEFAULT_RECENCY_HALF_LIFE_SECS};
 use crate::entry::{ContextEntry, EntryKind};
 use crate::error::CoreError;
 use crate::traits::{ContextStorage, Result, Searcher};
@@ -45,11 +45,19 @@ pub struct ContextEngine {
 
 impl ContextEngine {
     /// Create a new engine with the given storage backend, searcher, and config.
+    ///
+    /// If `config.recency_half_life_secs` is not positive and finite, it is
+    /// clamped to [`DEFAULT_RECENCY_HALF_LIFE_SECS`] to prevent NaN/inf in
+    /// recency decay scoring.
     pub fn new(
         storage: Box<dyn ContextStorage>,
         searcher: Box<dyn Searcher>,
-        config: CoreConfig,
+        mut config: CoreConfig,
     ) -> Self {
+        if !config.recency_half_life_secs.is_finite() || config.recency_half_life_secs <= 0.0 {
+            config.recency_half_life_secs = DEFAULT_RECENCY_HALF_LIFE_SECS;
+        }
+
         Self {
             storage,
             searcher,
@@ -587,5 +595,41 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("content must not be empty"));
+    }
+
+    #[test]
+    fn test_invalid_half_life_clamped_to_default() {
+        let invalid_values: Vec<f64> = vec![0.0, -1.0, -100.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+
+        for value in invalid_values {
+            let mut config = default_config(100);
+            config.recency_half_life_secs = value;
+
+            let engine = ContextEngine::new(
+                Box::new(MockStorage::new()),
+                Box::new(MockSearcher::empty()),
+                config,
+            );
+
+            assert_eq!(
+                engine.config.recency_half_life_secs,
+                DEFAULT_RECENCY_HALF_LIFE_SECS,
+                "half_life {value} should have been clamped to default",
+            );
+        }
+    }
+
+    #[test]
+    fn test_valid_half_life_preserved() {
+        let mut config = default_config(100);
+        config.recency_half_life_secs = 3600.0; // 1 hour — valid
+
+        let engine = ContextEngine::new(
+            Box::new(MockStorage::new()),
+            Box::new(MockSearcher::empty()),
+            config,
+        );
+
+        assert!((engine.config.recency_half_life_secs - 3600.0).abs() < f64::EPSILON);
     }
 }

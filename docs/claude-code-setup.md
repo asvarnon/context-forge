@@ -141,7 +141,7 @@ recency_half_life_hours = 72.0
 | `top_k` | integer | 10 | Max entries to consider |
 | `recency_half_life_hours` | float | 72.0 | Recency decay half-life in hours |
 
-Precedence: CLI flags > config file > compile-time defaults. The config file is created manually — Context Forge does not write to it.
+For options that have corresponding CLI flags (`--token-budget`, `--top-k`), precedence is: CLI flags > config file > compile-time defaults. `recency_half_life_hours` is config-file only. The config file is created manually — Context Forge does not write to it.
 
 ## Token Budget
 
