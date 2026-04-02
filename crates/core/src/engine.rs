@@ -599,7 +599,14 @@ mod tests {
 
     #[test]
     fn test_invalid_half_life_clamped_to_default() {
-        let invalid_values: Vec<f64> = vec![0.0, -1.0, -100.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let invalid_values: Vec<f64> = vec![
+            0.0,
+            -1.0,
+            -100.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
 
         for value in invalid_values {
             let mut config = default_config(100);
@@ -612,8 +619,7 @@ mod tests {
             );
 
             assert_eq!(
-                engine.config.recency_half_life_secs,
-                DEFAULT_RECENCY_HALF_LIFE_SECS,
+                engine.config.recency_half_life_secs, DEFAULT_RECENCY_HALF_LIFE_SECS,
                 "half_life {value} should have been clamped to default",
             );
         }
