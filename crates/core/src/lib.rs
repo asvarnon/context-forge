@@ -64,6 +64,7 @@ mod tests {
             token_budget: 8192,
             db_path: PathBuf::from("/tmp/cf.db"),
             eviction_policy: EvictionPolicy::Lru,
+            recency_half_life_secs: 259_200.0,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: CoreConfig = serde_json::from_str(&json).unwrap();

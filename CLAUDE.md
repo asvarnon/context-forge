@@ -50,7 +50,7 @@ crates/storage/ (SQLite + FTS5; implements core traits)
 
 Assemble algorithm:
 1. FTS5 BM25 search against query string
-2. Apply recency decay: `score * 0.5^(age_seconds / 86400)` (24-hour half-life)
+2. Apply recency decay: `score * 0.5^(age_seconds / 259200)` (72-hour half-life, configurable via `CoreConfig`)
 3. Sort by weighted score descending
 4. Greedy bin-pack into token budget (skip oversized entries, don't stop)
 
@@ -62,7 +62,7 @@ Token estimate: `text.len() / 4`
 |---|---|---|
 | `cf pre-compact` | PreCompact | Snapshot current conversation to DB |
 | `cf save [--kind auto]` | PostCompact | Store compaction summary |
-| `cf query [--format text] [--top-k N]` | SessionStart | Assemble + emit context |
+| `cf query [--query Q] [--format text] [--top-k N]` | SessionStart | Assemble + emit context |
 | `cf clear` | — | Delete all entries |
 | `cf info` | — | Print DB diagnostics |
 

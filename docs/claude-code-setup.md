@@ -71,7 +71,7 @@ Add the following to your chosen settings file:
         "hooks": [
           {
             "type": "command",
-            "command": "cf query --format text --top-k 10",
+            "command": "cf query --format text",
             "timeout": 10000
           }
         ]
@@ -108,6 +108,40 @@ cf query --format text --top-k 5
 # Clean up test data
 cf clear
 ```
+
+## Query Filter
+
+The `cf query` command accepts an optional `--query` flag to filter entries by FTS5 full-text search:
+
+```bash
+# Return only entries matching "security"
+cf query --query "security" --format text
+
+# FTS5 syntax: AND, OR, NOT, NEAR, quoted phrases
+cf query --query "security AND hardening" --format text
+```
+
+Multi-word queries without explicit FTS5 operators are automatically expanded with OR — `security hardening` becomes `security OR hardening`.
+
+Omit `--query` to return all entries ranked by recency (the default behavior).
+
+## Configuration File
+
+You can set defaults for `cf query` in an optional TOML config file at `~/.context-forge/config.toml`:
+
+```toml
+token_budget = 16000
+top_k = 10
+recency_half_life_hours = 72.0
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `token_budget` | integer | 16000 | Max tokens to assemble |
+| `top_k` | integer | 10 | Max entries to consider |
+| `recency_half_life_hours` | float | 72.0 | Recency decay half-life in hours |
+
+For options that have corresponding CLI flags (`--token-budget`, `--top-k`), precedence is: CLI flags > config file > compile-time defaults. `recency_half_life_hours` is config-file only. The config file is created manually — Context Forge does not write to it.
 
 ## Token Budget
 

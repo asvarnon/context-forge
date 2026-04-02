@@ -71,6 +71,20 @@ Both `napi` (reader) and `cli` (writer) access the same SQLite file. WAL mode en
 
 **`crates/cli`** — clap-based CLI binary (`cf`). Invoked by Claude Code hooks or directly from the terminal. Subcommands: `pre-compact`, `save`, `query`, `clear`, `info`. Delegates entirely to `core`.
 
+## Agent System
+
+Custom VS Code agents in `.github/agents/` provide specialized capabilities:
+
+| Agent | Role |
+|-------|------|
+| Claude | Orchestrator — planning, architecture, coordination |
+| Codex | Implementation — code, tests, debugging |
+| Review | Engineering quality — design patterns, scalability |
+| Security | Vulnerability auditing, threat modeling |
+| Documentation | Non-code artifacts — README, guides, design docs |
+| Clean Code | Readability — naming, decomposition, idiomatic patterns. Performance takes precedence over readability in hot paths |
+| Research | Build-vs-buy analysis, library discovery, prior art. Enforces trusted source registry and supply chain security checklist |
+
 ## Development Setup
 
 ```bash
@@ -130,12 +144,25 @@ cf info                 Print database diagnostics
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--query` | *(none — returns all)* | FTS5 search query to filter entries (supports AND, OR, NOT, NEAR, quoted phrases) |
 | `--token-budget` | 16000 | Max tokens to assemble. Increase for richer context |
 | `--top-k` | 10 | Max entries to consider |
 | `--format` | json | Output format: `json` or `text` |
 | `--db` | `~/.context-forge/context.db` | Database path |
 
 All subcommands support `--help` for full usage.
+
+## Configuration
+
+Optional config file at `~/.context-forge/config.toml` sets defaults for `cf query`:
+
+```toml
+token_budget = 16000
+top_k = 10
+recency_half_life_hours = 72.0
+```
+
+For `token_budget` and `top_k`, CLI flags override config file values, which override compile-time defaults. `recency_half_life_hours` is read only from the config file (or falls back to the compile-time default if not set).
 
 ## Related Repos
 

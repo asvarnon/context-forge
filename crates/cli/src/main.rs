@@ -7,6 +7,7 @@ use std::{fs, process};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use cf_core::config::DEFAULT_RECENCY_HALF_LIFE_SECS;
 use cf_core::engine::MATCH_ALL_QUERY;
 use cf_core::traits::ContextStorage;
 use cf_core::{ContextEngine, CoreConfig, EntryKind, EvictionPolicy};
@@ -98,12 +99,15 @@ enum Command {
         /// Path to the SQLite database file.
         #[arg(long, default_value_os_t = default_db_path())]
         db: PathBuf,
+        /// Optional search query (FTS5 syntax). Omit for all entries.
+        #[arg(long)]
+        query: Option<String>,
         /// Number of entries to return.
-        #[arg(long, default_value_t = 10)]
-        top_k: usize,
+        #[arg(long)]
+        top_k: Option<usize>,
         /// Token budget for assembly.
-        #[arg(long, default_value_t = DEFAULT_TOKEN_BUDGET)]
-        token_budget: usize,
+        #[arg(long)]
+        token_budget: Option<usize>,
         /// Output format.
         #[arg(long, default_value = "json")]
         format: OutputFormat,
@@ -160,10 +164,11 @@ fn run(cli: Cli) -> Result<(), String> {
         } => cmd_save(&db, kind.into(), max_entries),
         Command::Query {
             db,
+            query,
             top_k,
             token_budget,
             format,
-        } => cmd_query(&db, top_k, token_budget, &format),
+        } => cmd_query(&db, query.as_deref(), top_k, token_budget, &format),
         Command::Clear { db } => cmd_clear(&db),
         Command::Info { db } => cmd_info(&db),
     }
@@ -190,11 +195,8 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
                 // Empty/whitespace-only transcript_path: treat as missing, fall back to stdin.
                 trimmed.to_owned()
             } else {
-                let path = Path::new(path_str);
-                if !path.exists() {
-                    return Err(format!("transcript file not found: {}", path.display()));
-                }
-                transcript::read_transcript(path)?
+                let validated_path = validate_transcript_path(Path::new(path_str))?;
+                transcript::read_transcript(&validated_path)?
             }
         } else {
             trimmed.to_owned()
@@ -208,7 +210,12 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
     }
 
     ensure_db_dir(db)?;
-    let engine = make_engine(db, max_entries, DEFAULT_TOKEN_BUDGET)?;
+    let engine = make_engine(
+        db,
+        max_entries,
+        DEFAULT_TOKEN_BUDGET,
+        DEFAULT_RECENCY_HALF_LIFE_SECS,
+    )?;
     let id = engine
         .save_snapshot(&content, EntryKind::PreCompact)
         .map_err(|e| e.to_string())?;
@@ -246,7 +253,12 @@ fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String
     }
 
     ensure_db_dir(db)?;
-    let engine = make_engine(db, max_entries, DEFAULT_TOKEN_BUDGET)?;
+    let engine = make_engine(
+        db,
+        max_entries,
+        DEFAULT_TOKEN_BUDGET,
+        DEFAULT_RECENCY_HALF_LIFE_SECS,
+    )?;
     let id = engine
         .save_snapshot(&content, kind)
         .map_err(|e| e.to_string())?;
@@ -257,17 +269,50 @@ fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String
 
 fn cmd_query(
     db: &Path,
-    top_k: usize,
-    token_budget: usize,
+    query: Option<&str>,
+    top_k: Option<usize>,
+    token_budget: Option<usize>,
     format: &OutputFormat,
 ) -> Result<(), String> {
     ensure_db_dir(db)?;
-    let engine = make_engine(db, DEFAULT_MAX_ENTRIES, token_budget)?;
+
+    let file_cfg = load_config()?;
+
+    // Validate recency_half_life_hours from config file.
+    if let Some(h) = file_cfg.recency_half_life_hours {
+        if h <= 0.0 || !h.is_finite() {
+            return Err(format!(
+                "recency_half_life_hours must be a positive finite number, got {h}"
+            ));
+        }
+    }
+
+    // CLI flags > config file > compile-time defaults.
+    let effective_budget = token_budget
+        .or(file_cfg.token_budget)
+        .unwrap_or(DEFAULT_TOKEN_BUDGET);
+    let effective_top_k = top_k.or(file_cfg.top_k).unwrap_or(10);
+    let recency_half_life_secs = file_cfg
+        .recency_half_life_hours
+        .map_or(DEFAULT_RECENCY_HALF_LIFE_SECS, |h| h * 3600.0);
+
+    let engine = make_engine(
+        db,
+        DEFAULT_MAX_ENTRIES,
+        effective_budget,
+        recency_half_life_secs,
+    )?;
+
+    let query_str = match query {
+        Some(raw) => preprocess_query(raw),
+        None => MATCH_ALL_QUERY.to_owned(),
+    };
+
     let mut entries = engine
-        .assemble(MATCH_ALL_QUERY, token_budget)
+        .assemble(&query_str, effective_budget)
         .map_err(|e| e.to_string())?;
 
-    entries.truncate(top_k);
+    entries.truncate(effective_top_k);
 
     match format {
         OutputFormat::Json => {
@@ -309,6 +354,41 @@ fn cmd_info(db: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate that a transcript path is safe to read.
+///
+/// Claude Code transcripts are JSONL files stored under the user's home directory.
+/// This prevents path traversal attacks where a crafted `transcript_path` could
+/// read arbitrary files.
+fn validate_transcript_path(path: &Path) -> Result<PathBuf, String> {
+    // Canonicalize resolves symlinks and `..` components.
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("invalid transcript path {}: {e}", path.display()))?;
+
+    // Must be a .jsonl file.
+    match canonical.extension().and_then(|e| e.to_str()) {
+        Some("jsonl") => {}
+        _ => {
+            return Err(format!(
+                "transcript path must be a .jsonl file: {}",
+                canonical.display()
+            ))
+        }
+    }
+
+    // Must be under the user's home directory.
+    let home = dirs::home_dir()
+        .ok_or_else(|| "cannot determine home directory for path validation".to_string())?;
+    if !canonical.starts_with(&home) {
+        return Err(format!(
+            "transcript path must be under home directory: {}",
+            canonical.display()
+        ));
+    }
+
+    Ok(canonical)
+}
+
 /// Ensure the parent directory of the database file exists.
 fn ensure_db_dir(db: &Path) -> Result<(), String> {
     if let Some(parent) = db.parent() {
@@ -320,10 +400,65 @@ fn ensure_db_dir(db: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Expand a natural-language query for FTS5.
+///
+/// Multi-word queries without explicit FTS5 operators (AND, OR, NOT, NEAR)
+/// are split into individual terms joined with OR for broader recall.
+/// Single words and queries already using FTS5 syntax pass through unchanged.
+fn preprocess_query(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return MATCH_ALL_QUERY.to_owned();
+    }
+    // Pass through if the query already contains quoted phrases.
+    if trimmed.contains('"') {
+        return trimmed.to_owned();
+    }
+    // Check for whole-word FTS5 operators (case-insensitive).
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    let has_operator = words.iter().any(|w| {
+        let upper = w.to_uppercase();
+        matches!(upper.as_str(), "AND" | "OR" | "NOT" | "NEAR")
+    });
+    if has_operator {
+        return trimmed.to_owned();
+    }
+    if words.len() <= 1 {
+        return trimmed.to_owned();
+    }
+    words.join(" OR ")
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct FileConfig {
+    token_budget: Option<usize>,
+    top_k: Option<usize>,
+    recency_half_life_hours: Option<f64>,
+}
+
+/// Load optional config from `~/.context-forge/config.toml`.
+///
+/// Returns the default config if the file does not exist.
+fn load_config() -> Result<FileConfig, String> {
+    let base_dir = dirs::home_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(std::env::temp_dir);
+    let config_path = base_dir.join(".context-forge").join("config.toml");
+    if !config_path.exists() {
+        return Ok(FileConfig::default());
+    }
+    let contents = fs::read_to_string(&config_path)
+        .map_err(|e| format!("failed to read {}: {e}", config_path.display()))?;
+    toml::from_str(&contents).map_err(|e| format!("invalid TOML in {}: {e}", config_path.display()))
+}
+
 fn make_engine(
     db: &Path,
     max_entries: usize,
     token_budget: usize,
+    recency_half_life_secs: f64,
 ) -> Result<ContextEngine, String> {
     let (storage, searcher) = open_storage(db, max_entries).map_err(|e| e.to_string())?;
     let config = CoreConfig {
@@ -331,10 +466,118 @@ fn make_engine(
         token_budget,
         db_path: db.to_path_buf(),
         eviction_policy: EvictionPolicy::Lru,
+        recency_half_life_secs,
     };
     Ok(ContextEngine::new(
         Box::new(storage),
         Box::new(searcher),
         config,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_preprocess_empty() {
+        assert_eq!(preprocess_query(""), MATCH_ALL_QUERY);
+        assert_eq!(preprocess_query("   "), MATCH_ALL_QUERY);
+    }
+
+    #[test]
+    fn test_preprocess_single_word() {
+        assert_eq!(preprocess_query("security"), "security");
+    }
+
+    #[test]
+    fn test_preprocess_multi_word_or_expansion() {
+        assert_eq!(
+            preprocess_query("security hardening"),
+            "security OR hardening"
+        );
+        assert_eq!(preprocess_query("memory leak fix"), "memory OR leak OR fix");
+    }
+
+    #[test]
+    fn test_preprocess_explicit_operators_passthrough() {
+        assert_eq!(
+            preprocess_query("security AND hardening"),
+            "security AND hardening"
+        );
+        assert_eq!(
+            preprocess_query("security OR hardening"),
+            "security OR hardening"
+        );
+        assert_eq!(preprocess_query("NOT deprecated"), "NOT deprecated");
+    }
+
+    #[test]
+    fn test_preprocess_operators_case_insensitive() {
+        assert_eq!(
+            preprocess_query("security and hardening"),
+            "security and hardening"
+        );
+        assert_eq!(
+            preprocess_query("security or hardening"),
+            "security or hardening"
+        );
+    }
+
+    #[test]
+    fn test_preprocess_quoted_passthrough() {
+        assert_eq!(preprocess_query("\"exact phrase\""), "\"exact phrase\"");
+    }
+
+    #[test]
+    fn test_preprocess_operator_substring_no_false_positive() {
+        // "MEMORY" contains "OR" as substring but should NOT trigger passthrough
+        assert_eq!(preprocess_query("MEMORY leak"), "MEMORY OR leak");
+        // "ANDROID" contains "AND" as substring
+        assert_eq!(preprocess_query("ANDROID setup"), "ANDROID OR setup");
+    }
+
+    #[test]
+    fn test_validate_transcript_path_rejects_non_jsonl() {
+        // Create a temp file with a .txt extension — must be rejected.
+        let dir = tempfile::tempdir().unwrap();
+        let bad_file = dir.path().join("transcript.txt");
+        std::fs::write(&bad_file, "content").unwrap();
+
+        let result = validate_transcript_path(&bad_file);
+        assert!(result.is_err());
+        assert!(
+            result.as_ref().unwrap_err().contains(".jsonl"),
+            "error should mention .jsonl: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_transcript_path_rejects_outside_home() {
+        // A .jsonl file in a temp dir (outside $HOME) should be rejected.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("transcript.jsonl");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = validate_transcript_path(&file);
+        // On most systems temp dirs are outside $HOME, so this should fail.
+        // If $HOME happens to contain the temp dir, this test is a no-op.
+        let home = dirs::home_dir().unwrap();
+        let canonical = file.canonicalize().unwrap();
+        if !canonical.starts_with(&home) {
+            assert!(result.is_err());
+            assert!(
+                result.as_ref().unwrap_err().contains("home directory"),
+                "error should mention home directory: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_transcript_path_rejects_nonexistent() {
+        let result = validate_transcript_path(Path::new("/nonexistent/transcript.jsonl"));
+        assert!(result.is_err());
+    }
 }
