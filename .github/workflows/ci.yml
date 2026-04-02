@@ -10,5 +10,5 @@ on:
 jobs:
   ci:
     # Skip redundant CI on cargo-release version-bump commits
-    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message || '', 'chore: release')
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message || '', 'chore: release')"
     uses: ./.github/workflows/ci-checks.yml
