@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-04-02
+
+### Bug Fixes
+
+- Sanitize FTS5 operator chars in query input ([8e0ed1a](https://github.com/asvarnon/context-forge/commit/8e0ed1acbe94d0a79eae696ca35bb57926d5e6d1))
+- *(ci)* Guard head_commit.message with event_name check ([436b6bd](https://github.com/asvarnon/context-forge/commit/436b6bd0178c24edbd5e6e944c5deeb12bb9a151))
+- *(ci)* Quote YAML if-expressions to prevent parse errors ([e913f9f](https://github.com/asvarnon/context-forge/commit/e913f9fa732d72dcb90d9d1d56fb5e4c234788ec))
+
+### Miscellaneous
+
+- Extract reusable CI workflow, skip redundant runs on release ([69b31be](https://github.com/asvarnon/context-forge/commit/69b31bef1fa73bab0681448307c5db1d3fb5264a))
+
 ## [0.3.0] - 2026-04-02
 
 ### Features
@@ -25,6 +37,7 @@ All notable changes to this project will be documented in this file.
 
 - Add Clean Code and Research agents ([3745b8f](https://github.com/asvarnon/context-forge/commit/3745b8f41b81a9c8b23ab3e4e044ec1464c1befc))
 - Enhance Clean Code and Research agents ([08fbd39](https://github.com/asvarnon/context-forge/commit/08fbd39ce95eef215e49aff741ce001cf8b2ac04))
+- Release v0.3.0 ([0e8b6d3](https://github.com/asvarnon/context-forge/commit/0e8b6d34db0dcaf88017e031ea35a461c7ff75f9))
 
 ## [0.2.2] - 2026-04-01
 
