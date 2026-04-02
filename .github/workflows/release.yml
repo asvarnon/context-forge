@@ -9,8 +9,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci:
+    name: CI Gate
+    uses: ./.github/workflows/ci-checks.yml
+
   build:
     name: Build (${{ matrix.target.os }})
+    needs: ci
     runs-on: ${{ matrix.target.os }}
     permissions:
       contents: read
