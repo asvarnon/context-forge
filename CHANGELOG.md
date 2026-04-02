@@ -2,11 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-04-02
+
+### Features
+
+- Increase default token budget to 16,000 ([8720f6a](https://github.com/asvarnon/context-forge/commit/8720f6a372c7c87fbf16bba235eb2454d21a5e40))
+- Custom search queries, config file, FTS5 preprocessing, tunable half-life ([#34](https://github.com/asvarnon/context-forge/issues/34)) ([234c42b](https://github.com/asvarnon/context-forge/commit/234c42bb60659090677d4c62c7ad96b4acc5e2b3))
+
+### Bug Fixes
+
+- Address PR review comments ([#38](https://github.com/asvarnon/context-forge/issues/38)) ([c5b3e85](https://github.com/asvarnon/context-forge/commit/c5b3e8524c3548d619528dba41a8dfb344d59653))
+
+### Documentation
+
+- Add Clean Code and Research agents to architecture docs ([6371ef2](https://github.com/asvarnon/context-forge/commit/6371ef2ed7d6b788c982c2a2a74234fe906d9d21))
+
+### Styling
+
+- Fix cargo fmt formatting in engine tests ([cddd577](https://github.com/asvarnon/context-forge/commit/cddd577a6766cf0ef126aa4a681f108b535d97af))
+
+### Miscellaneous
+
+- Add Clean Code and Research agents ([3745b8f](https://github.com/asvarnon/context-forge/commit/3745b8f41b81a9c8b23ab3e4e044ec1464c1befc))
+- Enhance Clean Code and Research agents ([08fbd39](https://github.com/asvarnon/context-forge/commit/08fbd39ce95eef215e49aff741ce001cf8b2ac04))
+
 ## [0.2.2] - 2026-04-01
 
 ### Bug Fixes
 
 - *(ci)* Harden release pipeline and install scripts ([08ddeb4](https://github.com/asvarnon/context-forge/commit/08ddeb4ff2d17a9fb93b2026694a9f70a63c083c))
+
+### Miscellaneous
+
+- Release v0.2.2 ([007879b](https://github.com/asvarnon/context-forge/commit/007879b088a2b3f4988c16c9fc8a61f33a883763))
 
 ## [0.2.1] - 2026-04-01
 
