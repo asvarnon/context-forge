@@ -12,4 +12,9 @@ cf-core = { path = "../core" }
 cf-storage = { path = "../storage" }
 clap = { workspace = true }
 dirs = "5"
+serde = { workspace = true }
 serde_json = { workspace = true }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
