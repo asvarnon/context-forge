@@ -130,6 +130,17 @@ impl ContextEngine {
             timestamp,
             kind,
             token_count: Some(token_count),
+            session_id: None,
+            compaction_count: None,
+            compaction_trigger: None,
+            runtime: None,
+            model: None,
+            cwd: None,
+            git_branch: None,
+            git_sha: None,
+            turn_id: None,
+            agent_type: None,
+            agent_id: None,
         };
 
         // Lock the compound count → evict → save operation to prevent TOCTOU races.
@@ -331,6 +342,17 @@ mod tests {
             timestamp,
             kind: EntryKind::Manual,
             token_count: Some(estimate_tokens(content)),
+            session_id: None,
+            compaction_count: None,
+            compaction_trigger: None,
+            runtime: None,
+            model: None,
+            cwd: None,
+            git_branch: None,
+            git_sha: None,
+            turn_id: None,
+            agent_type: None,
+            agent_id: None,
         }
     }
 

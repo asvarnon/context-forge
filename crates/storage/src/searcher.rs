@@ -4,12 +4,12 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
 use cf_core::engine::MATCH_ALL_QUERY;
-use cf_core::entry::{ContextEntry, ScoredEntry};
+use cf_core::entry::ScoredEntry;
 use cf_core::error::CoreError;
 use cf_core::traits::Searcher;
 use cf_core::Result;
 
-use crate::schema::str_to_kind;
+use crate::schema::row_to_entry;
 
 /// FTS5-backed full-text search over stored context entries.
 pub struct SqliteSearcher {
@@ -34,7 +34,9 @@ impl SqliteSearcher {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, content, timestamp, kind, token_count \
+                "SELECT id, content, timestamp, kind, token_count, \
+                        session_id, compaction_count, compaction_trigger, runtime, model, cwd, \
+                        git_branch, git_sha, turn_id, agent_type, agent_id \
                  FROM entries \
                  ORDER BY timestamp DESC \
                  LIMIT ?1",
@@ -43,26 +45,11 @@ impl SqliteSearcher {
 
         let results = stmt
             .query_map(rusqlite::params![limit as i64], |row| {
-                let kind_str: String = row.get(3)?;
-                let token_count: Option<i64> = row.get(4)?;
-
-                let kind = str_to_kind(&kind_str).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
+                let entry = row_to_entry(row)?;
 
                 Ok(ScoredEntry {
-                    entry: ContextEntry {
-                        id: row.get(0)?,
-                        content: row.get(1)?,
-                        timestamp: row.get(2)?,
-                        kind,
-                        token_count: token_count.map(|v| v as usize),
-                    },
-                    score: row.get::<_, i64>(2)? as f64,
+                    score: entry.timestamp as f64,
+                    entry,
                 })
             })
             .map_err(|e| CoreError::Storage(e.to_string()))?
@@ -86,7 +73,10 @@ impl Searcher for SqliteSearcher {
 
         let mut stmt = conn
             .prepare(
-                "SELECT e.id, e.content, e.timestamp, e.kind, e.token_count, bm25(entries_fts) AS score \
+                "SELECT e.id, e.content, e.timestamp, e.kind, e.token_count, \
+                        e.session_id, e.compaction_count, e.compaction_trigger, e.runtime, \
+                        e.model, e.cwd, e.git_branch, e.git_sha, e.turn_id, e.agent_type, \
+                        e.agent_id, bm25(entries_fts) AS score \
                  FROM entries_fts f \
                  JOIN entries e ON e.rowid = f.rowid \
                  WHERE entries_fts MATCH ?1 \
@@ -97,26 +87,11 @@ impl Searcher for SqliteSearcher {
 
         let results = stmt
             .query_map(rusqlite::params![query, limit as i64], |row| {
-                let kind_str: String = row.get(3)?;
-                let token_count: Option<i64> = row.get(4)?;
-                let raw_score: f64 = row.get(5)?;
-
-                let kind = str_to_kind(&kind_str).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
+                let entry = row_to_entry(row)?;
+                let raw_score: f64 = row.get("score")?;
 
                 Ok(ScoredEntry {
-                    entry: ContextEntry {
-                        id: row.get(0)?,
-                        content: row.get(1)?,
-                        timestamp: row.get(2)?,
-                        kind,
-                        token_count: token_count.map(|v| v as usize),
-                    },
+                    entry,
                     // bm25() returns negative values; negate so higher = more relevant.
                     score: -raw_score,
                 })

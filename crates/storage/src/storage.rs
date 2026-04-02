@@ -3,13 +3,12 @@ use std::sync::Arc;
 
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Row;
 
 use cf_core::entry::ContextEntry;
 use cf_core::error::CoreError;
 use cf_core::traits::ContextStorage;
 
-use crate::schema::{kind_to_str, migrate, str_to_kind};
+use crate::schema::{kind_to_str, migrate, row_to_entry};
 
 #[derive(Debug)]
 struct PragmaCustomizer;
@@ -19,7 +18,9 @@ impl CustomizeConnection<rusqlite::Connection, rusqlite::Error> for PragmaCustom
         &self,
         conn: &mut rusqlite::Connection,
     ) -> std::result::Result<(), rusqlite::Error> {
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
+        )?;
         Ok(())
     }
 }
@@ -81,21 +82,6 @@ impl SqliteStorage {
     }
 }
 
-/// Map a `rusqlite::Row` (from `SELECT * FROM entries …`) to a `ContextEntry`.
-fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ContextEntry> {
-    let kind_str: String = row.get(3)?;
-    let token_count: Option<i64> = row.get(4)?;
-    Ok(ContextEntry {
-        id: row.get(0)?,
-        content: row.get(1)?,
-        timestamp: row.get(2)?,
-        kind: str_to_kind(&kind_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        token_count: token_count.map(|v| v as usize),
-    })
-}
-
 impl ContextStorage for SqliteStorage {
     fn save(&self, entry: &ContextEntry) -> cf_core::Result<()> {
         let mut conn = self
@@ -133,13 +119,43 @@ impl ContextStorage for SqliteStorage {
         }
 
         tx.execute(
-            "INSERT OR REPLACE INTO entries (id, content, timestamp, kind, token_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO entries (
+                id,
+                content,
+                timestamp,
+                kind,
+                token_count,
+                session_id,
+                compaction_count,
+                compaction_trigger,
+                runtime,
+                model,
+                cwd,
+                git_branch,
+                git_sha,
+                turn_id,
+                agent_type,
+                agent_id
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+            )",
             rusqlite::params![
                 entry.id,
                 entry.content,
                 entry.timestamp,
                 kind_to_str(&entry.kind),
                 entry.token_count.map(|v| v as i64),
+                entry.session_id,
+                entry.compaction_count,
+                entry.compaction_trigger,
+                entry.runtime,
+                entry.model,
+                entry.cwd,
+                entry.git_branch,
+                entry.git_sha,
+                entry.turn_id,
+                entry.agent_type,
+                entry.agent_id,
             ],
         )
         .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -155,7 +171,28 @@ impl ContextStorage for SqliteStorage {
             .get()
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         let mut stmt = conn
-            .prepare("SELECT id, content, timestamp, kind, token_count FROM entries ORDER BY timestamp DESC LIMIT ?1")
+            .prepare(
+                "SELECT
+                    id,
+                    content,
+                    timestamp,
+                    kind,
+                    token_count,
+                    session_id,
+                    compaction_count,
+                    compaction_trigger,
+                    runtime,
+                    model,
+                    cwd,
+                    git_branch,
+                    git_sha,
+                    turn_id,
+                    agent_type,
+                    agent_id
+                 FROM entries
+                 ORDER BY timestamp DESC
+                 LIMIT ?1",
+            )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         let entries = stmt
@@ -173,7 +210,27 @@ impl ContextStorage for SqliteStorage {
             .get()
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         let mut stmt = conn
-            .prepare("SELECT id, content, timestamp, kind, token_count FROM entries ORDER BY timestamp DESC")
+            .prepare(
+                "SELECT
+                    id,
+                    content,
+                    timestamp,
+                    kind,
+                    token_count,
+                    session_id,
+                    compaction_count,
+                    compaction_trigger,
+                    runtime,
+                    model,
+                    cwd,
+                    git_branch,
+                    git_sha,
+                    turn_id,
+                    agent_type,
+                    agent_id
+                 FROM entries
+                 ORDER BY timestamp DESC",
+            )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         let entries = stmt
