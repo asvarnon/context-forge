@@ -3,6 +3,7 @@ name: Security Audit
 on:
   push:
     branches: [main, develop]
+    tags-ignore: ["v*"]
   pull_request:
     branches: [main, develop]
   schedule:
@@ -15,6 +16,7 @@ jobs:
   cargo-audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message || '', 'chore: release')"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
@@ -24,6 +26,7 @@ jobs:
   npm-audit:
     name: npm audit
     runs-on: ubuntu-latest
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message || '', 'chore: release')"
     defaults:
       run:
         working-directory: extension

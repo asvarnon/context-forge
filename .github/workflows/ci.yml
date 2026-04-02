@@ -3,95 +3,12 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    tags-ignore: ["v*"]
   pull_request:
     branches: [main, develop]
 
-permissions:
-  contents: read
-
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
-
 jobs:
-  fmt:
-    name: cargo fmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          key: ${{ matrix.os }}
-      - run: cargo test --workspace
-
-  typescript:
-    name: tsc + eslint
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: extension
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 20
-      - name: Install dependencies
-        run: npm ci
-        if: hashFiles('extension/package-lock.json') != ''
-      - name: Type check
-        run: npx tsc --noEmit
-        if: hashFiles('extension/package-lock.json') != ''
-      - name: Lint
-        run: npx eslint .
-        if: hashFiles('extension/package-lock.json') != '' && hashFiles('extension/.eslintrc*', 'extension/eslint.config.*') != ''
-
-  napi-build:
-    name: napi build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            lib-name: libcf_napi.so
-          - os: windows-latest
-            lib-name: cf_napi.dll
-          - os: macos-latest
-            lib-name: libcf_napi.dylib
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          key: napi-${{ matrix.os }}
-      - name: Build napi module
-        run: cargo build -p cf-napi
-      - name: Verify artifact exists
-        shell: bash
-        run: test -f target/debug/${{ matrix.lib-name }}
+  ci:
+    # Skip redundant CI on cargo-release version-bump commits
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message || '', 'chore: release')"
+    uses: ./.github/workflows/ci-checks.yml

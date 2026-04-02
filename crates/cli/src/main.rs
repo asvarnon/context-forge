@@ -405,6 +405,10 @@ fn ensure_db_dir(db: &Path) -> Result<(), String> {
 /// Multi-word queries without explicit FTS5 operators (AND, OR, NOT, NEAR)
 /// are split into individual terms joined with OR for broader recall.
 /// Single words and queries already using FTS5 syntax pass through unchanged.
+///
+/// Tokens containing FTS5 operator characters (hyphens, leading `+`) are
+/// automatically wrapped in double quotes so FTS5 treats them as literals
+/// rather than as boolean operators.
 fn preprocess_query(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -423,10 +427,24 @@ fn preprocess_query(raw: &str) -> String {
     if has_operator {
         return trimmed.to_owned();
     }
-    if words.len() <= 1 {
-        return trimmed.to_owned();
+    // Quote tokens that contain FTS5 operator characters to prevent
+    // misinterpretation (e.g. "release-please" → `"release-please"`
+    // instead of `release NOT please`).
+    let sanitized: Vec<String> = words.iter().map(|w| quote_fts5_token(w)).collect();
+    if sanitized.len() <= 1 {
+        return sanitized.into_iter().next().unwrap_or_default();
     }
-    words.join(" OR ")
+    sanitized.join(" OR ")
+}
+
+/// Wrap a token in double quotes if it contains characters that FTS5
+/// would interpret as operators (`-` anywhere, `+` as prefix).
+fn quote_fts5_token(token: &str) -> String {
+    if token.contains('-') || token.starts_with('+') {
+        format!("\"{token}\"")
+    } else {
+        token.to_owned()
+    }
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -535,6 +553,44 @@ mod tests {
         assert_eq!(preprocess_query("MEMORY leak"), "MEMORY OR leak");
         // "ANDROID" contains "AND" as substring
         assert_eq!(preprocess_query("ANDROID setup"), "ANDROID OR setup");
+    }
+
+    #[test]
+    fn test_preprocess_hyphenated_single_word_quoted() {
+        // Hyphens are FTS5 NOT operators — must be quoted to stay literal.
+        assert_eq!(preprocess_query("release-please"), "\"release-please\"");
+        assert_eq!(preprocess_query("pre-compact"), "\"pre-compact\"");
+        assert_eq!(preprocess_query("context-forge"), "\"context-forge\"");
+    }
+
+    #[test]
+    fn test_preprocess_hyphenated_multi_word() {
+        // Hyphenated tokens quoted; plain tokens left alone; joined with OR.
+        assert_eq!(
+            preprocess_query("pre-compact hook"),
+            "\"pre-compact\" OR hook"
+        );
+        assert_eq!(
+            preprocess_query("context-forge token-budget"),
+            "\"context-forge\" OR \"token-budget\""
+        );
+    }
+
+    #[test]
+    fn test_preprocess_plus_prefix_quoted() {
+        // Leading '+' is FTS5 required-term operator — must be quoted.
+        assert_eq!(preprocess_query("+foo"), "\"+foo\"");
+        assert_eq!(preprocess_query("+foo bar"), "\"+foo\" OR bar");
+    }
+
+    #[test]
+    fn test_preprocess_plain_words_unchanged() {
+        // No special chars — should behave exactly as before.
+        assert_eq!(preprocess_query("security"), "security");
+        assert_eq!(
+            preprocess_query("security hardening"),
+            "security OR hardening"
+        );
     }
 
     #[test]
