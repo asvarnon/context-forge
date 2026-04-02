@@ -71,6 +71,20 @@ Both `napi` (reader) and `cli` (writer) access the same SQLite file. WAL mode en
 
 **`crates/cli`** — clap-based CLI binary (`cf`). Invoked by Claude Code hooks or directly from the terminal. Subcommands: `pre-compact`, `save`, `query`, `clear`, `info`. Delegates entirely to `core`.
 
+## Agent System
+
+Custom VS Code agents in `.github/agents/` provide specialized capabilities:
+
+| Agent | Role |
+|-------|------|
+| Claude | Orchestrator — planning, architecture, coordination |
+| Codex | Implementation — code, tests, debugging |
+| Review | Engineering quality — design patterns, scalability |
+| Security | Vulnerability auditing, threat modeling |
+| Documentation | Non-code artifacts — README, guides, design docs |
+| Clean Code | Readability — naming, decomposition, idiomatic patterns. Performance takes precedence over readability in hot paths |
+| Research | Build-vs-buy analysis, library discovery, prior art. Enforces trusted source registry and supply chain security checklist |
+
 ## Development Setup
 
 ```bash
