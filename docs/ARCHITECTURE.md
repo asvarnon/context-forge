@@ -242,3 +242,19 @@ opt-level = "z"
 ```
 
 Optimized for binary size — LTO + strip + single codegen unit + size optimization.
+
+## Agent System
+
+Custom VS Code agents in `.github/agents/` provide specialized review and research capabilities. Each agent has scoped tools and a defined role:
+
+| Agent | File | Tools | Role |
+|-------|------|-------|------|
+| Claude | `claude.agent.md` | read, search, execute, edit, todo | Orchestrator — planning, architecture, coordination |
+| Codex | `codex.agent.md` | read, search, execute, edit, todo | Implementation — writing code, tests, debugging |
+| Review | `review.agent.md` | read, search | Engineering quality — design patterns, layer separation, scalability |
+| Security | `security.agent.md` | read, search | Vulnerability auditing, threat modeling, access control review |
+| Documentation | `docs.agent.md` | read, search, edit, todo | Non-code artifacts — README, guides, design docs |
+| Clean Code | `clean-code.agent.md` | read, search | Readability — naming, decomposition, idiomatic patterns, module organization. **Performance Precedence Rule:** optimal data structures and processing efficiency take priority over readability in hot paths; flags missing performance documentation rather than the code structure |
+| Research | `research.agent.md` | read, search, web | Build-vs-buy analysis, crate/library discovery, prior art. Enforces a 3-tier **Trusted Source Registry** (Tier 1: official registries, Tier 2: community vetted, Tier 3: use with caution) and a 7-point supply chain security checklist. Never recommends packages not on a Tier 1 registry |
+
+**Complementary review roles:** Review Agent covers architecture and correctness; Clean Code Agent covers readability and standards. Both are read-only.
