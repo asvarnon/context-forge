@@ -12,9 +12,6 @@ use crate::traits::{ContextStorage, Result, Searcher};
 /// Default candidate limit when fetching search results for assembly.
 const DEFAULT_SEARCH_LIMIT: usize = 50;
 
-/// Half-life for recency decay in seconds (24 hours).
-const RECENCY_HALF_LIFE: f64 = 86_400.0;
-
 /// Well-defined query constant that means "match all entries" in the Searcher trait.
 ///
 /// FTS5 interprets `*` as a prefix wildcard that matches every token.
@@ -75,12 +72,13 @@ impl ContextEngine {
 
         let now = current_timestamp();
 
-        // Apply recency weighting.
+        // Apply recency weighting using the configured half-life.
+        let half_life = self.config.recency_half_life_secs;
         let mut weighted: Vec<(f64, ContextEntry)> = candidates
             .into_iter()
             .map(|se| {
                 let age = (now - se.entry.timestamp).max(0) as f64;
-                let decay = recency_decay(age, RECENCY_HALF_LIFE);
+                let decay = recency_decay(age, half_life);
                 let weighted_score = se.score * decay;
                 (weighted_score, se.entry)
             })
@@ -222,6 +220,7 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_RECENCY_HALF_LIFE_SECS;
     use crate::entry::ScoredEntry;
     use std::path::PathBuf;
 
@@ -313,6 +312,7 @@ mod tests {
             token_budget: 8192,
             db_path: PathBuf::from(":memory:"),
             eviction_policy: EvictionPolicy::Lru,
+            recency_half_life_secs: DEFAULT_RECENCY_HALF_LIFE_SECS,
         }
     }
 
@@ -541,16 +541,18 @@ mod tests {
 
     #[test]
     fn test_recency_decay_values() {
+        let half_life = crate::config::DEFAULT_RECENCY_HALF_LIFE_HOURS * 3600.0;
+
         // At age 0, decay should be 1.0.
-        let decay_0 = recency_decay(0.0, RECENCY_HALF_LIFE);
+        let decay_0 = recency_decay(0.0, half_life);
         assert!((decay_0 - 1.0).abs() < f64::EPSILON);
 
         // At age = half_life, decay should be 0.5.
-        let decay_half = recency_decay(RECENCY_HALF_LIFE, RECENCY_HALF_LIFE);
+        let decay_half = recency_decay(half_life, half_life);
         assert!((decay_half - 0.5).abs() < 1e-10);
 
         // At age = 2 * half_life, decay should be 0.25.
-        let decay_double = recency_decay(2.0 * RECENCY_HALF_LIFE, RECENCY_HALF_LIFE);
+        let decay_double = recency_decay(2.0 * half_life, half_life);
         assert!((decay_double - 0.25).abs() < 1e-10);
     }
 

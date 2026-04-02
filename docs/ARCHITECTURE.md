@@ -44,12 +44,14 @@ Claude Code fires this **after** compaction, piping a JSON payload to stdin that
 
 Fires when a new Claude Code session starts.
 
-1. Call `engine.assemble("*", token_budget)`
-   - FTS5 search with `*` (matches all entries)
-   - Recency decay weighting (exponential, 24-hour half-life)
+1. Load optional config from `~/.context-forge/config.toml` (see Config File below)
+2. Preprocess query string: multi-word queries without FTS5 operators (AND, OR, NOT, NEAR, quotes) are auto-expanded with OR — e.g. `security hardening` → `security OR hardening`. Explicit FTS5 syntax passes through unchanged. This preprocessing happens in the CLI layer (`crates/cli/`).
+3. Call `engine.assemble(query, token_budget)` (query defaults to `"*"` when `--query` is omitted)
+   - FTS5 search
+   - Recency decay weighting (exponential, configurable half-life — default 72 hours)
    - Sort by weighted score descending
    - Greedy token budget packing (skips oversized entries)
-2. Output entry contents verbatim, joined with `\n---\n`
+4. Output entry contents verbatim, joined with `\n---\n`
 
 No summarization on output.
 
@@ -80,14 +82,16 @@ The PostCompact entry stores Claude's own `compact_summary` — which IS a summa
 
 **`recency_decay(age_seconds, half_life)`**
 - Exponential decay: `0.5^(age / half_life)`
-- Half-life: 24 hours (86400 seconds)
+- Default half-life: 72 hours (259200 seconds)
+- Configurable via `CoreConfig.recency_half_life_secs` (set from config file or CLI)
 - Recent entries score higher; old entries fade but never reach zero
 
 ### Constants
 
 ```rust
-DEFAULT_SEARCH_LIMIT: usize = 100;
-RECENCY_HALF_LIFE: f64 = 86400.0;  // 24 hours
+DEFAULT_SEARCH_LIMIT: usize = 50;
+DEFAULT_RECENCY_HALF_LIFE_HOURS: f64 = 72.0;  // in config.rs, converted to seconds at call sites
+DEFAULT_RECENCY_HALF_LIFE_SECS: f64 = 259200.0;  // computed from HOURS * 3600.0 in config.rs
 DEFAULT_MAX_ENTRIES: usize = 1000;
 DEFAULT_TOKEN_BUDGET: usize = 16000;
 ```
@@ -166,6 +170,14 @@ STRICT mode enforces column types. CHECK constraints enforce valid `kind` values
 ### Argument Parsing
 
 clap derive-based. Subcommands: `pre-compact`, `save`, `query`, `clear`, `info`.
+
+### Config File
+
+`cf query` loads an optional TOML config from `~/.context-forge/config.toml`. Supported keys: `token_budget` (usize), `top_k` (usize), `recency_half_life_hours` (f64). CLI flags take precedence over config values, which take precedence over compile-time defaults.
+
+### Query Preprocessing
+
+Before passing a query to the engine, the CLI checks for FTS5 operators (AND, OR, NOT, NEAR, quoted phrases). If none are found and the query has multiple words, it inserts `OR` between each word. This happens in `crates/cli/` — the core engine receives a valid FTS5 query string.
 
 ### Database Path Resolution
 

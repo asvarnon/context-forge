@@ -33,6 +33,7 @@ pub struct JsConfig {
     pub max_entries: Option<u32>,
     pub token_budget: Option<u32>,
     pub eviction_policy: Option<String>,
+    pub recency_half_life_hours: Option<f64>,
 }
 
 // ── Conversion helpers ──────────────────────────────────────────────
@@ -333,6 +334,21 @@ impl ContextForgeCore {
             .transpose()?
             .unwrap_or(EvictionPolicy::Lru);
 
+        if let Some(h) = config.as_ref().and_then(|c| c.recency_half_life_hours) {
+            if h <= 0.0 || !h.is_finite() {
+                return Err(napi::Error::new(
+                    napi::Status::InvalidArg,
+                    format!("recency_half_life_hours must be a positive finite number, got {h}"),
+                ));
+            }
+        }
+
+        let recency_half_life_secs = config
+            .as_ref()
+            .and_then(|c| c.recency_half_life_hours)
+            .map(|h| h * 3600.0)
+            .unwrap_or(cf_core::config::DEFAULT_RECENCY_HALF_LIFE_SECS);
+
         let path = PathBuf::from(&db_path);
 
         let (sqlite_storage, sqlite_searcher) =
@@ -346,6 +362,7 @@ impl ContextForgeCore {
             token_budget,
             db_path: path,
             eviction_policy,
+            recency_half_life_secs,
         };
 
         let engine = Arc::new(ContextEngine::new(

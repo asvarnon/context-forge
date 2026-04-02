@@ -130,12 +130,25 @@ cf info                 Print database diagnostics
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--query` | *(none — returns all)* | FTS5 search query to filter entries (supports AND, OR, NOT, NEAR, quoted phrases) |
 | `--token-budget` | 16000 | Max tokens to assemble. Increase for richer context |
 | `--top-k` | 10 | Max entries to consider |
 | `--format` | json | Output format: `json` or `text` |
 | `--db` | `~/.context-forge/context.db` | Database path |
 
 All subcommands support `--help` for full usage.
+
+## Configuration
+
+Optional config file at `~/.context-forge/config.toml` sets defaults for `cf query`:
+
+```toml
+token_budget = 16000
+top_k = 10
+recency_half_life_hours = 72.0
+```
+
+CLI flags override config file values, which override compile-time defaults.
 
 ## Related Repos
 
