@@ -37,6 +37,58 @@ Always include this section. If recommending "build," state what maintenance bur
 
 ---
 
+## Trusted Source Registry
+
+**Always start searches from trusted registries.** Prefer high-trust sources with community ratings, download metrics, and audit history over random GitHub repos.
+
+### Tier 1 — Official Registries (search here first)
+
+| Ecosystem | Registry | Trust Signal |
+|-----------|----------|--------------|
+| **Rust** | [crates.io](https://crates.io) | Download count, reverse deps, `cargo audit` integration |
+| **Rust** | [lib.rs](https://lib.rs) | Curated categories, quality scores, maintenance grades |
+| **Rust** | [docs.rs](https://docs.rs) | Auto-generated API docs — check completeness |
+| **Python** | [PyPI](https://pypi.org) | Download stats, maintainer verified, `pip audit` |
+| **JavaScript/TypeScript** | [npm](https://www.npmjs.com) | Weekly downloads, dependents count, `npm audit` |
+| **JavaScript/TypeScript** | [JSR](https://jsr.io) | TypeScript-first, score system, provenance |
+| **.NET** | [NuGet](https://www.nuget.org) | Verified publishers, download count |
+| **Go** | [pkg.go.dev](https://pkg.go.dev) | Module index, import count, license detection |
+| **Java/Kotlin** | [Maven Central](https://search.maven.org) | Group ID verification, signature validation |
+
+### Tier 2 — Community Vetted (corroborate with Tier 1)
+
+| Source | Use For |
+|--------|---------|
+| **GitHub** (stars, forks, issues) | Cross-reference with registry stats — stars alone mean nothing |
+| **Awesome-* lists** | Discovery only — always verify on Tier 1 registry |
+| **Reddit** (r/rust, r/python, r/node) | Community sentiment, real-world usage reports |
+| **Language forums** (users.rust-lang.org, discuss.python.org) | Expert recommendations |
+| **StackOverflow** | Historical solutions — verify versions are current |
+
+### Tier 3 — Use With Caution
+
+| Source | Risk |
+|--------|------|
+| Random GitHub repos (no registry listing) | No vetting pipeline, no download metrics, unknown maintainer |
+| Personal blogs / Medium articles | May recommend outdated or niche packages |
+| AI-generated recommendations | May hallucinate package names — always verify on Tier 1 |
+
+### Supply Chain Security Checks
+
+**Every recommended package MUST pass these checks before inclusion in a recommendation:**
+
+1. **Registry presence** — listed on a Tier 1 registry (not just a GitHub URL)
+2. **Maintainer identity** — identifiable maintainer(s) with history in the ecosystem
+3. **Download volume** — prefer packages with >10K downloads/month for critical functionality
+4. **Known vulnerabilities** — check `cargo audit` / `npm audit` / `pip audit` / relevant advisory DBs
+5. **Dependency depth** — count transitive deps. Flag packages pulling in >20 transitive deps for simple functionality
+6. **Typosquatting check** — verify the package name isn't a near-miss of a popular package
+7. **Source match** — confirm the registry package builds from the linked source repo
+
+> **Hard rule:** Never recommend a package you can't verify on a Tier 1 registry. If the only option is an unregistered GitHub repo, recommend "build" instead and cite the repo as inspiration only.
+
+---
+
 ## Research Process
 
 ### 1. Understand the Requirement
@@ -45,11 +97,11 @@ Before searching, read enough of the codebase to understand:
 - What constraints exist (no-network, pure library, specific trait bounds, etc.)
 - What the project already depends on (check `Cargo.toml`, `package.json`)
 
-### 2. Search Broadly
-- Search crates.io, npm, PyPI (whichever ecosystem applies)
-- Search GitHub for repositories solving the same problem
-- Search for blog posts, comparisons, and "awesome-*" lists
-- Check if the language's standard library covers it
+### 2. Search Trusted Sources (in order)
+1. **Tier 1 registries** for the target ecosystem — check if the standard library covers it first
+2. **Tier 2 community sources** to discover candidates you missed
+3. **GitHub search** for repositories solving the same problem
+4. **Never skip to Tier 3** without exhausting Tier 1 and 2
 
 ### 3. Evaluate Candidates
 For each promising candidate:
@@ -58,6 +110,7 @@ For each promising candidate:
 - **Check dependency tree** — does it pull in heavy transitive deps?
 - **Check license compatibility** — flag GPL/AGPL for MIT/Apache projects
 - **Check download/usage stats** — community adoption signal
+- **Run supply chain security checks** (see above)
 
 ### 4. Test Fit
 - Would integrating this require changing our architecture?
@@ -68,12 +121,13 @@ For each promising candidate:
 
 ## Rust Ecosystem Guidance
 
-### Where to Search
-- **crates.io** — primary registry. Sort by recent downloads and recent updates.
-- **lib.rs** — curated index with categories and quality scores.
-- **docs.rs** — API docs. Check if the API is clean and well-documented.
-- **GitHub search** — for niche solutions not on crates.io.
-- **Rust users forum / Reddit r/rust** — community recommendations.
+### Where to Search (priority order)
+1. **Rust standard library** — check `std` first
+2. **crates.io** — primary registry. Sort by recent downloads and recent updates.
+3. **lib.rs** — curated index with categories and quality scores.
+4. **docs.rs** — API docs. Check if the API is clean and well-documented.
+5. **GitHub search** — for niche solutions not on crates.io.
+6. **Rust users forum / Reddit r/rust** — community recommendations.
 
 ### Red Flags
 - No updates in 12+ months with open issues
@@ -81,13 +135,16 @@ For each promising candidate:
 - Depends on nightly-only features without justification
 - License mismatch (our project is MIT/Apache-2.0)
 - Pulls in `tokio` or other heavy runtimes for a synchronous use case
+- Not listed on crates.io (GitHub-only)
+- Fewer than 1K total downloads with no notable reverse dependents
 
 ### Green Flags
-- Used by well-known projects (check reverse dependencies)
+- Used by well-known projects (check reverse dependencies on crates.io)
 - Clean `clippy` and comprehensive tests
 - Minimal dependency tree
 - Good documentation with examples
 - Maintained by a known community member or team
+- Passes `cargo audit` with no advisories
 
 ---
 
