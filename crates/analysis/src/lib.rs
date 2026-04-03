@@ -6,16 +6,22 @@
 //! It provides tokenization, stopword filtering, n-gram extraction,
 //! and term count computation.
 
+pub mod classification;
 pub mod extraction;
 pub mod frequency;
+pub mod lexicon;
 pub mod ngrams;
 pub mod prefilter;
 pub mod recurrence;
 pub mod tokenizer;
 
 // Re-export public API
+pub use classification::{
+    classify_passages, ClassificationConfig, ClassifiedPassage, ImportanceCategory, PassageContext,
+};
 pub use extraction::{extract_passages, ExtractedPassage, ExtractionConfig, ExtractionEntry};
 pub use frequency::{term_counts, term_counts_with_ngrams};
+pub use lexicon::Lexicons;
 pub use ngrams::{bigrams, extract, trigrams};
 pub use prefilter::{strip_execution_artifacts, FilterToggle, PrefilterConfig};
 pub use recurrence::{compute_recurrence, RecurrenceConfig, RecurrenceResult};
