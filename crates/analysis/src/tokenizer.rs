@@ -63,14 +63,19 @@ impl Tokenizer {
                     .collect::<String>()
             })
             .filter(|token| !token.is_empty())
-            .filter(|token| !self.is_stopword(token))
+            .filter(|token| !self.is_normalized_stopword(token))
             .collect()
+    }
+
+    /// Return true if the given normalized term is a stopword.
+    fn is_normalized_stopword(&self, term: &str) -> bool {
+        self.stopwords.contains(term)
     }
 
     /// Return true if the given term is a stopword.
     #[must_use]
     pub fn is_stopword(&self, term: &str) -> bool {
-        self.stopwords.contains(&term.to_ascii_lowercase())
+        self.is_normalized_stopword(&term.to_ascii_lowercase())
     }
 }
 

@@ -4,7 +4,7 @@
 //!
 //! This crate is pure computation - no I/O, no storage, no network.
 //! It provides tokenization, stopword filtering, n-gram extraction,
-//! and term frequency computation.
+//! and term count computation.
 
 pub mod frequency;
 pub mod ngrams;
