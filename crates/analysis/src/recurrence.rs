@@ -33,6 +33,12 @@ pub struct RecurrenceResult {
     pub recurrence_score: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FilteredRecurrenceMetrics {
+    session_frequency: usize,
+    recurrence_score: f64,
+}
+
 /// Compute cross-session recurrence for terms.
 ///
 /// Input is one term-count map per session. Presence is binary per session;
@@ -60,7 +66,7 @@ pub fn compute_recurrence(
         }
     }
 
-    let mut filtered: HashMap<String, RecurrenceResult> = HashMap::new();
+    let mut filtered: HashMap<String, FilteredRecurrenceMetrics> = HashMap::new();
     for (term, sf) in session_frequency {
         if config.term_blocklist.contains(&term) {
             continue;
@@ -76,9 +82,8 @@ pub fn compute_recurrence(
         }
 
         filtered.insert(
-            term.clone(),
-            RecurrenceResult {
-                term,
+            term,
+            FilteredRecurrenceMetrics {
                 session_frequency: sf,
                 recurrence_score,
             },
@@ -87,9 +92,8 @@ pub fn compute_recurrence(
 
     let mut suppressed_unigrams: HashSet<String> = HashSet::new();
     for term in filtered.keys() {
-        let space_count = term.chars().filter(|&ch| ch == ' ').count();
-        if space_count >= 1 {
-            for unigram in term.split(' ') {
+        if term.contains(' ') {
+            for unigram in term.split_whitespace() {
                 suppressed_unigrams.insert(unigram.to_string());
             }
         }
@@ -99,7 +103,14 @@ pub fn compute_recurrence(
         filtered.remove(unigram);
     }
 
-    let mut results: Vec<RecurrenceResult> = filtered.into_values().collect();
+    let mut results: Vec<RecurrenceResult> = filtered
+        .into_iter()
+        .map(|(term, metrics)| RecurrenceResult {
+            term,
+            session_frequency: metrics.session_frequency,
+            recurrence_score: metrics.recurrence_score,
+        })
+        .collect();
     results.sort_by(|left, right| {
         right
             .recurrence_score
