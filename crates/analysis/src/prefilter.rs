@@ -102,6 +102,7 @@ pub fn strip_execution_artifacts(content: &str, config: &PrefilterConfig) -> Str
 
             if is_tool_use_line(trimmed) {
                 in_tool_block = true;
+                in_code_fence = false;
                 push_blank_line_if_needed(&mut filtered_lines);
                 continue;
             }
@@ -189,8 +190,9 @@ fn is_structural_marker_line(trimmed_line: &str) -> bool {
         return true;
     }
 
-    let lower = trimmed_line.to_ascii_lowercase();
-    lower.starts_with("human:") || lower.starts_with("assistant:") || lower == "user:"
+    (trimmed_line.len() >= 6 && trimmed_line[..6].eq_ignore_ascii_case("human:"))
+        || (trimmed_line.len() >= 10 && trimmed_line[..10].eq_ignore_ascii_case("assistant:"))
+        || trimmed_line.eq_ignore_ascii_case("user:")
 }
 
 fn is_bash_command_line(trimmed_line: &str) -> bool {
