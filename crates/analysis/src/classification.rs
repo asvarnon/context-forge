@@ -10,7 +10,8 @@ pub struct ClassificationConfig {
     pub corrective_proximity: usize,
     /// Minimum sessions for reinforcing classification (default: 3).
     pub reinforcing_min_sessions: usize,
-    /// Minimum bigram overlap ratio for reinforcing (default: 0.6).
+    /// Minimum Jaccard overlap ratio over `triggering_terms` for reinforcing
+    /// classification (default: 0.6).
     pub reinforcing_overlap_threshold: f64,
 }
 
@@ -134,7 +135,12 @@ fn is_corrective(
     lexicons: &Lexicons,
     config: &ClassificationConfig,
 ) -> bool {
-    if passage.passage_text.trim_end().ends_with('?') {
+    if passage
+        .passage_text
+        .trim_end()
+        .trim_end_matches(['"', '\'', ')', ']', '}'])
+        .ends_with('?')
+    {
         return false;
     }
 
@@ -181,9 +187,15 @@ fn detect_stateful(passage: &PassageContext, lexicons: &Lexicons) -> Option<(Str
         let operator_lower = operator.to_lowercase();
         for (start_index, _) in passage_lower.match_indices(&operator_lower) {
             let end_index = start_index + operator_lower.len();
-            let has_start_boundary = start_index == 0
+            let operator_starts_with_alnum = operator_lower.as_bytes()[0].is_ascii_alphanumeric();
+            let operator_ends_with_alnum =
+                operator_lower.as_bytes()[operator_lower.len() - 1].is_ascii_alphanumeric();
+
+            let has_start_boundary = !operator_starts_with_alnum
+                || start_index == 0
                 || !passage_lower.as_bytes()[start_index - 1].is_ascii_alphanumeric();
-            let has_end_boundary = end_index >= passage_lower.len()
+            let has_end_boundary = !operator_ends_with_alnum
+                || end_index >= passage_lower.len()
                 || !passage_lower.as_bytes()[end_index].is_ascii_alphanumeric();
 
             if has_start_boundary && has_end_boundary {
@@ -581,6 +593,7 @@ fn clean_token(token: &str) -> String {
         .trim_matches(|character: char| {
             !character.is_ascii_alphanumeric() && !matches!(character, '\'' | '-' | '_' | ':' | '=')
         })
+        .trim_matches([':', '='])
         .to_string()
 }
 
