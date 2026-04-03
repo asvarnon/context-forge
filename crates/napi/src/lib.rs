@@ -7,7 +7,7 @@ use napi_derive::napi;
 
 use cf_core::{
     ContextEngine, ContextEntry, ContextStorage, CoreConfig, CoreError, EntryKind, EvictionPolicy,
-    Result as CoreResult, ScoredEntry, Searcher,
+    Result as CoreResult, SaveOptions, ScoredEntry, Searcher,
 };
 use cf_storage::{open_storage, SqliteSearcher, SqliteStorage};
 
@@ -70,6 +70,7 @@ fn parse_eviction_policy(s: &str) -> napi::Result<EvictionPolicy> {
 }
 
 fn to_js_entry(e: ContextEntry) -> napi::Result<JsContextEntry> {
+    // session_id and compaction_count are intentionally omitted from the JS surface.
     let token_count = e
         .token_count
         .map(|v| {
@@ -129,6 +130,10 @@ impl ContextStorage for SharedStorage {
     fn count(&self) -> CoreResult<usize> {
         self.0.count()
     }
+
+    fn max_compaction_count(&self, session_id: &str) -> CoreResult<Option<i64>> {
+        self.0.max_compaction_count(session_id)
+    }
 }
 
 struct SharedSearcher(Arc<SqliteSearcher>);
@@ -153,7 +158,7 @@ impl Task for SaveTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         self.engine
-            .save_snapshot(&self.content, self.kind.clone())
+            .save_snapshot(&self.content, self.kind.clone(), &SaveOptions::default())
             .map_err(core_err)
     }
 

@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use cf_core::config::DEFAULT_RECENCY_HALF_LIFE_SECS;
 use cf_core::engine::MATCH_ALL_QUERY;
 use cf_core::traits::ContextStorage;
-use cf_core::{ContextEngine, CoreConfig, EntryKind, EvictionPolicy};
+use cf_core::{ContextEngine, CoreConfig, EntryKind, EvictionPolicy, SaveOptions};
 use cf_storage::open_storage;
 
 mod transcript;
@@ -23,6 +23,9 @@ const DEFAULT_TOKEN_BUDGET: usize = 16_000;
 
 /// Default timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
+/// Maximum allowed length for a session_id from stdin JSON.
+const MAX_SESSION_ID_LEN: usize = 512;
 
 /// Return the default database path: `~/.context-forge/context.db`.
 fn default_db_path() -> PathBuf {
@@ -185,10 +188,18 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
         return Err("stdin was empty; nothing to save".into());
     }
 
+    let parsed_json = serde_json::from_str::<serde_json::Value>(trimmed).ok();
+    let session_id = parsed_json
+        .as_ref()
+        .and_then(|obj| obj.get("session_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| s.len() <= MAX_SESSION_ID_LEN)
+        .map(str::to_owned);
+
     // Try to parse stdin as JSON metadata with transcript_path.
     // If present, read and format the JSONL transcript file.
     // Otherwise, fall back to storing stdin verbatim (backward compat).
-    let content = if let Ok(obj) = serde_json::from_str::<serde_json::Value>(trimmed) {
+    let content = if let Some(obj) = parsed_json.as_ref() {
         if let Some(path_str) = obj.get("transcript_path").and_then(|v| v.as_str()) {
             let path_str = path_str.trim();
             if path_str.is_empty() {
@@ -216,8 +227,9 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
         DEFAULT_TOKEN_BUDGET,
         DEFAULT_RECENCY_HALF_LIFE_SECS,
     )?;
+    let options = SaveOptions { session_id };
     let id = engine
-        .save_snapshot(&content, EntryKind::PreCompact)
+        .save_snapshot(&content, EntryKind::PreCompact, &options)
         .map_err(|e| e.to_string())?;
 
     println!("{id}");
@@ -237,8 +249,16 @@ fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String
         return Err("stdin was empty; nothing to save".into());
     }
 
+    let parsed_json = serde_json::from_str::<serde_json::Value>(trimmed).ok();
+    let session_id = parsed_json
+        .as_ref()
+        .and_then(|obj| obj.get("session_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| s.len() <= MAX_SESSION_ID_LEN)
+        .map(str::to_owned);
+
     // Try to extract compact_summary from Claude Code PostCompact JSON.
-    let content = if let Ok(obj) = serde_json::from_str::<serde_json::Value>(trimmed) {
+    let content = if let Some(obj) = parsed_json.as_ref() {
         if let Some(summary) = obj.get("compact_summary").and_then(|v| v.as_str()) {
             summary.to_owned()
         } else {
@@ -259,8 +279,9 @@ fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String
         DEFAULT_TOKEN_BUDGET,
         DEFAULT_RECENCY_HALF_LIFE_SECS,
     )?;
+    let options = SaveOptions { session_id };
     let id = engine
-        .save_snapshot(&content, kind)
+        .save_snapshot(&content, kind, &options)
         .map_err(|e| e.to_string())?;
 
     println!("{id}");

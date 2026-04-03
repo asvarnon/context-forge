@@ -11,7 +11,7 @@ pub mod traits;
 
 // Re-export primary types at crate root for convenience.
 pub use config::{CoreConfig, EvictionPolicy};
-pub use engine::ContextEngine;
+pub use engine::{ContextEngine, SaveOptions};
 pub use entry::{ContextEntry, EntryKind, ScoredEntry};
 pub use error::CoreError;
 pub use traits::{ContextStorage, Result, Searcher};
