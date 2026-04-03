@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-04-03
+
+### Features
+
+- Schema v2 migration — unified runtime adapter + importance detection foundation ([50ed978](https://github.com/asvarnon/context-forge/commit/50ed978afc6ee3883211d7088aab7f33576b90f2))
+- Add analysis crate — tokenization, n-grams, and term frequency primitives ([c2eabf2](https://github.com/asvarnon/context-forge/commit/c2eabf27bb848a459750bc79069ffae9114e3c5b))
+- Parse session_id and compaction_count from hook stdin ([#44](https://github.com/asvarnon/context-forge/issues/44)) ([0789ba9](https://github.com/asvarnon/context-forge/commit/0789ba90a426bd7aea2f9b4bb98cb6a1ea551a9c))
+- Add fallback session grouping by timestamp proximity ([#45](https://github.com/asvarnon/context-forge/issues/45)) ([edf97ca](https://github.com/asvarnon/context-forge/commit/edf97ca0261bf4fb88184cb2032fa0b0f65543ec))
+- *(analysis)* Add content pre-filtering module ([#62](https://github.com/asvarnon/context-forge/issues/62)) ([d7ba9c9](https://github.com/asvarnon/context-forge/commit/d7ba9c991419124c7445b08227a8aa4524287bfd))
+- Implement session frequency and recurrence scoring ([#47](https://github.com/asvarnon/context-forge/issues/47)) ([e5c916e](https://github.com/asvarnon/context-forge/commit/e5c916e69c366e2eb1b589c49a8bcbff2341a7dd))
+
+### Bug Fixes
+
+- Address Copilot review comments on analysis crate ([86e5631](https://github.com/asvarnon/context-forge/commit/86e5631b3486a97f3ff2c181303f2e0d6f784b52))
+- Use char-safe truncation for session_id in error message ([9c9bd29](https://github.com/asvarnon/context-forge/commit/9c9bd291d0e3505bfb0144db212e37796b01353b))
+- Address PR #61 review comments ([a60e488](https://github.com/asvarnon/context-forge/commit/a60e48812d051bf68b88da4fad418646f2caf98d))
+- *(analysis)* Address PR #63 Copilot review comments ([5840135](https://github.com/asvarnon/context-forge/commit/584013578591bb76e2f9c1cca48006c83aac1ecb))
+
+### Refactoring
+
+- Address PR #64 review comments ([79dc054](https://github.com/asvarnon/context-forge/commit/79dc0540e4d59b161d2aa7274c0a1bbddd399a4a))
+
 ## [0.3.1] - 2026-04-02
 
 ### Bug Fixes
@@ -13,6 +35,7 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous
 
 - Extract reusable CI workflow, skip redundant runs on release ([69b31be](https://github.com/asvarnon/context-forge/commit/69b31bef1fa73bab0681448307c5db1d3fb5264a))
+- Release v0.3.1 ([e3cbd3c](https://github.com/asvarnon/context-forge/commit/e3cbd3c643dc7628cc4d569a6eb39cbda5c96662))
 
 ## [0.3.0] - 2026-04-02
 
@@ -82,7 +105,7 @@ All notable changes to this project will be documented in this file.
 - Retrigger release-please after enabling PR permissions ([007fa6b](https://github.com/asvarnon/context-forge/commit/007fa6b3ccd61475108ed4c32be8e1c91dd2cd31))
 - *(main)* Release 0.2.0 ([ed2ff62](https://github.com/asvarnon/context-forge/commit/ed2ff62c4257d28028f9614b82ecb340d372f2c1))
 
-## [0.1.1] - 2026-04-01
+## [0.1.0] - 2026-04-01
 
 ### Features
 
