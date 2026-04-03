@@ -10,7 +10,7 @@ pub struct ClassificationConfig {
     pub corrective_proximity: usize,
     /// Minimum sessions for reinforcing classification (default: 3).
     pub reinforcing_min_sessions: usize,
-    /// Minimum Jaccard overlap ratio over `triggering_terms` for reinforcing
+    /// Minimum bigram overlap ratio over passage text for reinforcing
     /// classification (default: 0.6).
     pub reinforcing_overlap_threshold: f64,
 }
@@ -352,10 +352,7 @@ fn apply_reinforcing(
                 continue;
             }
 
-            let overlap = triggering_overlap_ratio(
-                &passages[left].triggering_terms,
-                &passages[right].triggering_terms,
-            );
+            let overlap = bigram_overlap_ratio(&passages[left].text, &passages[right].text);
             if overlap > config.reinforcing_overlap_threshold {
                 if let Some(neighbors) = graph.get_mut(&left) {
                     neighbors.push(right);
@@ -492,25 +489,37 @@ fn shares_confirmation_token(left: &HashSet<String>, right: &HashSet<String>) ->
     clippy::cast_precision_loss,
     reason = "Overlap ratio uses f64 thresholding by configuration contract"
 )]
-fn triggering_overlap_ratio(left_terms: &[String], right_terms: &[String]) -> f64 {
-    let left: HashSet<String> = left_terms
-        .iter()
-        .map(|term| term.trim().to_lowercase())
-        .filter(|term| !term.is_empty())
-        .collect();
-    let right: HashSet<String> = right_terms
-        .iter()
-        .map(|term| term.trim().to_lowercase())
-        .filter(|term| !term.is_empty())
-        .collect();
+fn bigram_overlap_ratio(text_a: &str, text_b: &str) -> f64 {
+    let bigrams_a = text_bigrams(text_a);
+    let bigrams_b = text_bigrams(text_b);
 
-    let union_count = left.union(&right).count();
-    if union_count == 0 {
+    let min_count = bigrams_a.len().min(bigrams_b.len());
+    if min_count == 0 {
         return 0.0;
     }
 
-    let intersection_count = left.intersection(&right).count();
-    intersection_count as f64 / union_count as f64
+    let intersection_count = bigrams_a.intersection(&bigrams_b).count();
+    intersection_count as f64 / min_count as f64
+}
+
+fn text_bigrams(text: &str) -> HashSet<(String, String)> {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| {
+            word.to_lowercase()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+
+    let mut bigrams: HashSet<(String, String)> = HashSet::new();
+    for pair in words.windows(2) {
+        bigrams.insert((pair[0].clone(), pair[1].clone()));
+    }
+
+    bigrams
 }
 
 fn find_marker_positions(words: &[String], marker: &str) -> Vec<usize> {
@@ -869,15 +878,20 @@ mod tests {
         };
         let inputs = vec![
             passage(
-                "Yes confirmed cache policy works",
-                &["cache", "policy"],
+                "Yes always run cargo test before committing",
+                &["cargo", "test"],
                 "s1",
                 1,
             ),
-            passage("Yes cache policy still good", &["cache", "policy"], "s2", 2),
             passage(
-                "Confirmed cache policy remains stable",
-                &["cache", "policy"],
+                "Yes always run cargo test before committing code",
+                &["cargo", "test"],
+                "s2",
+                2,
+            ),
+            passage(
+                "Yes always run cargo test before committing",
+                &["cargo", "test"],
                 "s3",
                 3,
             ),
@@ -898,10 +912,15 @@ mod tests {
             ..ClassificationConfig::default()
         };
         let inputs = vec![
-            passage("Yes cache policy is fine", &["cache", "policy"], "s1", 1),
             passage(
-                "Confirmed cache policy is fine",
-                &["cache", "policy"],
+                "Yes always run cargo test before committing",
+                &["cargo", "test"],
+                "s1",
+                1,
+            ),
+            passage(
+                "Yes always run cargo test before committing",
+                &["cargo", "test"],
                 "s2",
                 2,
             ),
@@ -911,6 +930,76 @@ mod tests {
         assert!(result
             .iter()
             .all(|passage| !has_category(passage, ImportanceCategory::Reinforcing)));
+    }
+
+    #[test]
+    fn reinforcing_different_text_same_terms_rejected() {
+        let lexicons = Lexicons::default();
+        let config = ClassificationConfig {
+            reinforcing_min_sessions: 3,
+            reinforcing_overlap_threshold: 0.6,
+            ..ClassificationConfig::default()
+        };
+        let inputs = vec![
+            passage(
+                "Yes start the docker container on boot",
+                &["docker"],
+                "s1",
+                1,
+            ),
+            passage(
+                "Confirmed docker causes memory leak issues",
+                &["docker"],
+                "s2",
+                2,
+            ),
+            passage(
+                "Good the docker container starts on boot",
+                &["docker"],
+                "s3",
+                3,
+            ),
+        ];
+
+        let result = classify_passages(&inputs, &lexicons, &config);
+        assert!(result
+            .iter()
+            .all(|passage| !has_category(passage, ImportanceCategory::Reinforcing)));
+    }
+
+    #[test]
+    fn reinforcing_high_bigram_overlap_triggers() {
+        let lexicons = Lexicons::default();
+        let config = ClassificationConfig {
+            reinforcing_min_sessions: 3,
+            reinforcing_overlap_threshold: 0.6,
+            ..ClassificationConfig::default()
+        };
+        let inputs = vec![
+            passage(
+                "Yes always run cargo test before committing",
+                &["cargo", "test"],
+                "s1",
+                1,
+            ),
+            passage(
+                "Yes run cargo test before committing code",
+                &["cargo", "test"],
+                "s2",
+                2,
+            ),
+            passage(
+                "Yes always run cargo test before committing",
+                &["cargo", "test"],
+                "s3",
+                3,
+            ),
+        ];
+
+        let result = classify_passages(&inputs, &lexicons, &config);
+        assert!(result
+            .iter()
+            .all(|passage| has_category(passage, ImportanceCategory::Reinforcing)));
     }
 
     #[test]
