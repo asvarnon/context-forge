@@ -7,6 +7,7 @@ pub mod config;
 pub mod engine;
 pub mod entry;
 pub mod error;
+pub mod session;
 pub mod traits;
 
 // Re-export primary types at crate root for convenience.
@@ -14,6 +15,7 @@ pub use config::{CoreConfig, EvictionPolicy};
 pub use engine::{ContextEngine, SaveOptions};
 pub use entry::{ContextEntry, EntryKind, ScoredEntry};
 pub use error::CoreError;
+pub use session::{group_entries_by_session, SessionGroup};
 pub use traits::{ContextStorage, Result, Searcher};
 
 #[cfg(test)]
