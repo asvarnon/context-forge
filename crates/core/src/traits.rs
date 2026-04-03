@@ -21,6 +21,10 @@ pub trait ContextStorage: Send + Sync {
     fn clear(&self) -> Result<usize>;
     /// Return the total number of stored entries.
     fn count(&self) -> Result<usize>;
+    /// Return the maximum compaction count observed for `session_id`.
+    ///
+    /// Returns `None` when the session has no entries with compaction counts.
+    fn max_compaction_count(&self, session_id: &str) -> Result<Option<i64>>;
 }
 
 /// Trait for searching context entries by relevance.

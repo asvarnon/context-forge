@@ -274,4 +274,17 @@ impl ContextStorage for SqliteStorage {
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(count as usize)
     }
+
+    fn max_compaction_count(&self, session_id: &str) -> cf_core::Result<Option<i64>> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.query_row(
+            "SELECT MAX(compaction_count) FROM entries WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))
+    }
 }

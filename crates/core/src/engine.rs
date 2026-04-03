@@ -21,6 +21,13 @@ pub const MATCH_ALL_QUERY: &str = "*";
 /// Monotonic counter for ID uniqueness within the same second.
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Options for saving a snapshot entry.
+#[derive(Debug, Default, Clone)]
+pub struct SaveOptions {
+    /// Optional runtime session identifier.
+    pub session_id: Option<String>,
+}
+
 /// Estimate token count using whitespace heuristic (1 token ≈ 4 chars).
 pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
@@ -39,7 +46,9 @@ pub struct ContextEngine {
     storage: Box<dyn ContextStorage>,
     searcher: Box<dyn Searcher>,
     config: CoreConfig,
-    /// Guards the compound count → evict → save sequence against concurrent callers.
+    /// Guards the compound compaction_count → count → evict → save sequence
+    /// within a single process. Multi-process callers (separate CLI invocations)
+    /// are not protected; hook scheduling is relied on for exclusion.
     write_lock: Mutex<()>,
 }
 
@@ -115,14 +124,46 @@ impl ContextEngine {
     /// Save a new snapshot entry, evicting if at capacity.
     ///
     /// Returns the generated entry ID.
-    pub fn save_snapshot(&self, content: &str, kind: EntryKind) -> Result<String> {
+    pub fn save_snapshot(
+        &self,
+        content: &str,
+        kind: EntryKind,
+        options: &SaveOptions,
+    ) -> Result<String> {
         if content.is_empty() {
             return Err(CoreError::InvalidEntry("content must not be empty".into()));
         }
 
+        let session_id = options.session_id.clone();
+
         let timestamp = current_timestamp();
         let id = generate_id(content, timestamp);
         let token_count = estimate_tokens(content);
+
+        // Guards the compound compaction_count → count → evict → save sequence
+        // within a single process. Multi-process callers (separate CLI invocations)
+        // are not protected; hook scheduling is relied on for exclusion.
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let compaction_count = if matches!(kind, EntryKind::Auto) {
+            if let Some(sid) = session_id.as_deref() {
+                let current_max = self.storage.max_compaction_count(sid)?;
+                let next = current_max.unwrap_or(-1).checked_add(1).ok_or_else(|| {
+                    CoreError::Storage(format!(
+                        "compaction_count overflow for session '{}'",
+                        sid.chars().take(64).collect::<String>()
+                    ))
+                })?;
+                Some(next)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let entry = ContextEntry {
             id: id.clone(),
@@ -130,8 +171,8 @@ impl ContextEngine {
             timestamp,
             kind,
             token_count: Some(token_count),
-            session_id: None,
-            compaction_count: None,
+            session_id,
+            compaction_count,
             compaction_trigger: None,
             runtime: None,
             model: None,
@@ -142,12 +183,6 @@ impl ContextEngine {
             agent_type: None,
             agent_id: None,
         };
-
-        // Lock the compound count → evict → save operation to prevent TOCTOU races.
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Evict if at capacity.
         if self.storage.count()? >= self.config.max_entries {
@@ -299,6 +334,18 @@ mod tests {
 
         fn count(&self) -> Result<usize> {
             Ok(self.entries.lock().unwrap().len())
+        }
+
+        fn max_compaction_count(&self, session_id: &str) -> Result<Option<i64>> {
+            let max = self
+                .entries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.session_id.as_deref() == Some(session_id))
+                .filter_map(|entry| entry.compaction_count)
+                .max();
+            Ok(max)
         }
     }
 
@@ -474,7 +521,7 @@ mod tests {
         );
 
         let id = engine
-            .save_snapshot("hello world", EntryKind::Manual)
+            .save_snapshot("hello world", EntryKind::Manual, &SaveOptions::default())
             .unwrap();
         assert!(!id.is_empty());
 
@@ -507,7 +554,9 @@ mod tests {
         assert_eq!(engine.storage.count().unwrap(), 100);
 
         // Saving one more should evict one, keeping count at 100.
-        engine.save_snapshot("entry 100", EntryKind::Auto).unwrap();
+        engine
+            .save_snapshot("entry 100", EntryKind::Auto, &SaveOptions::default())
+            .unwrap();
         assert_eq!(engine.storage.count().unwrap(), 100);
     }
 
@@ -527,7 +576,7 @@ mod tests {
         );
 
         engine
-            .save_snapshot("fourth entry", EntryKind::Manual)
+            .save_snapshot("fourth entry", EntryKind::Manual, &SaveOptions::default())
             .unwrap();
 
         let all = engine.storage.get_all().unwrap();
@@ -560,7 +609,9 @@ mod tests {
             config,
         );
 
-        engine.save_snapshot("new entry", EntryKind::Auto).unwrap();
+        engine
+            .save_snapshot("new entry", EntryKind::Auto, &SaveOptions::default())
+            .unwrap();
 
         let all = engine.storage.get_all().unwrap();
         assert_eq!(all.len(), 2);
@@ -613,10 +664,136 @@ mod tests {
             default_config(100),
         );
 
-        let result = engine.save_snapshot("", EntryKind::Manual);
+        let result = engine.save_snapshot("", EntryKind::Manual, &SaveOptions::default());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("content must not be empty"));
+    }
+
+    #[test]
+    fn test_auto_compaction_count_increments_for_session() {
+        let engine = ContextEngine::new(
+            Box::new(MockStorage::new()),
+            Box::new(MockSearcher::empty()),
+            default_config(100),
+        );
+
+        engine
+            .save_snapshot(
+                "first auto",
+                EntryKind::Auto,
+                &SaveOptions {
+                    session_id: Some("sess-1".to_owned()),
+                },
+            )
+            .unwrap();
+        engine
+            .save_snapshot(
+                "second auto",
+                EntryKind::Auto,
+                &SaveOptions {
+                    session_id: Some("sess-1".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let all = engine.storage.get_all().unwrap();
+        let mut counts: Vec<i64> = all
+            .iter()
+            .filter_map(|entry| entry.compaction_count)
+            .collect();
+        counts.sort_unstable();
+
+        assert_eq!(all.len(), 2);
+        assert!(all
+            .iter()
+            .all(|entry| entry.session_id.as_deref() == Some("sess-1")));
+        assert_eq!(counts, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_pre_compact_with_session_has_no_compaction_count() {
+        let engine = ContextEngine::new(
+            Box::new(MockStorage::new()),
+            Box::new(MockSearcher::empty()),
+            default_config(100),
+        );
+
+        engine
+            .save_snapshot(
+                "pre compact snapshot",
+                EntryKind::PreCompact,
+                &SaveOptions {
+                    session_id: Some("sess-2".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let all = engine.storage.get_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].session_id.as_deref(), Some("sess-2"));
+        assert_eq!(all[0].compaction_count, None);
+    }
+
+    #[test]
+    fn test_auto_without_session_has_no_compaction_count() {
+        let engine = ContextEngine::new(
+            Box::new(MockStorage::new()),
+            Box::new(MockSearcher::empty()),
+            default_config(100),
+        );
+
+        engine
+            .save_snapshot(
+                "auto without session",
+                EntryKind::Auto,
+                &SaveOptions::default(),
+            )
+            .unwrap();
+
+        let all = engine.storage.get_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].session_id, None);
+        assert_eq!(all[0].compaction_count, None);
+    }
+
+    #[test]
+    fn test_pre_compact_then_auto_starts_compaction_count_at_zero() {
+        let engine = ContextEngine::new(
+            Box::new(MockStorage::new()),
+            Box::new(MockSearcher::empty()),
+            default_config(100),
+        );
+
+        engine
+            .save_snapshot(
+                "pre compact snapshot",
+                EntryKind::PreCompact,
+                &SaveOptions {
+                    session_id: Some("sess-mixed".to_owned()),
+                },
+            )
+            .unwrap();
+
+        engine
+            .save_snapshot(
+                "first auto after pre compact",
+                EntryKind::Auto,
+                &SaveOptions {
+                    session_id: Some("sess-mixed".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let all = engine.storage.get_all().unwrap();
+        let auto = all
+            .iter()
+            .find(|entry| {
+                entry.kind == EntryKind::Auto && entry.session_id.as_deref() == Some("sess-mixed")
+            })
+            .expect("auto entry for sess-mixed should exist");
+
+        assert_eq!(auto.compaction_count, Some(0));
     }
 
     #[test]

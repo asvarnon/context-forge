@@ -363,6 +363,85 @@ mod tests {
     }
 
     #[test]
+    fn test_max_compaction_count_none_for_unknown_session() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+
+        storage
+            .save(&make_entry("e1", "hello", 100, EntryKind::Manual))
+            .unwrap();
+
+        let max = storage.max_compaction_count("missing-session").unwrap();
+        assert_eq!(max, None);
+    }
+
+    #[test]
+    fn test_max_compaction_count_returns_session_max() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+
+        let entry1 = ContextEntry {
+            id: "s1-0".into(),
+            content: "first".into(),
+            timestamp: 100,
+            kind: EntryKind::Auto,
+            token_count: Some(1),
+            session_id: Some("sess-1".into()),
+            compaction_count: Some(0),
+            compaction_trigger: None,
+            runtime: None,
+            model: None,
+            cwd: None,
+            git_branch: None,
+            git_sha: None,
+            turn_id: None,
+            agent_type: None,
+            agent_id: None,
+        };
+        let entry2 = ContextEntry {
+            id: "s1-2".into(),
+            content: "second".into(),
+            timestamp: 200,
+            kind: EntryKind::Auto,
+            token_count: Some(1),
+            session_id: Some("sess-1".into()),
+            compaction_count: Some(2),
+            compaction_trigger: None,
+            runtime: None,
+            model: None,
+            cwd: None,
+            git_branch: None,
+            git_sha: None,
+            turn_id: None,
+            agent_type: None,
+            agent_id: None,
+        };
+        let other = ContextEntry {
+            id: "s2-5".into(),
+            content: "other".into(),
+            timestamp: 300,
+            kind: EntryKind::Auto,
+            token_count: Some(1),
+            session_id: Some("sess-2".into()),
+            compaction_count: Some(5),
+            compaction_trigger: None,
+            runtime: None,
+            model: None,
+            cwd: None,
+            git_branch: None,
+            git_sha: None,
+            turn_id: None,
+            agent_type: None,
+            agent_id: None,
+        };
+
+        storage.save(&entry1).unwrap();
+        storage.save(&entry2).unwrap();
+        storage.save(&other).unwrap();
+
+        let max = storage.max_compaction_count("sess-1").unwrap();
+        assert_eq!(max, Some(2));
+    }
+
+    #[test]
     fn test_insert_or_replace() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
