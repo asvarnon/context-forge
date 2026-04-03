@@ -154,7 +154,7 @@ impl ContextEngine {
                 let next = current_max.unwrap_or(-1).checked_add(1).ok_or_else(|| {
                     CoreError::Storage(format!(
                         "compaction_count overflow for session '{}'",
-                        if sid.len() > 64 { &sid[..64] } else { sid }
+                        sid.chars().take(64).collect::<String>()
                     ))
                 })?;
                 Some(next)
