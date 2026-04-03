@@ -17,7 +17,10 @@ pub fn group_entries_by_session(
     entries: &[ContextEntry],
     proximity_threshold_secs: i64,
 ) -> Vec<SessionGroup> {
-    debug_assert!(proximity_threshold_secs >= 0);
+    assert!(
+        proximity_threshold_secs >= 0,
+        "proximity_threshold_secs must be non-negative"
+    );
 
     let mut explicit_groups: BTreeMap<String, Vec<ContextEntry>> = BTreeMap::new();
     let mut fallback_entries: Vec<ContextEntry> = Vec::new();
@@ -59,7 +62,7 @@ pub fn group_entries_by_session(
             if gap > proximity_threshold_secs {
                 if let Some(earliest) = current_earliest_timestamp {
                     groups.push(SessionGroup {
-                        session_id: format!("fallback-{earliest}"),
+                        session_id: format!("__fallback__{earliest}"),
                         entries: std::mem::take(&mut current_group),
                     });
                 }
@@ -74,13 +77,15 @@ pub fn group_entries_by_session(
     }
 
     if !current_group.is_empty() {
-        let earliest = current_earliest_timestamp
-            .expect("invariant: timestamp set when group non-empty");
+        let earliest =
+            current_earliest_timestamp.expect("invariant: timestamp set when group non-empty");
         groups.push(SessionGroup {
-            session_id: format!("fallback-{earliest}"),
+            session_id: format!("__fallback__{earliest}"),
             entries: current_group,
         });
     }
+
+    groups.sort_by_key(|g| g.entries.first().map_or(i64::MAX, |e| e.timestamp));
 
     groups
 }
@@ -144,7 +149,7 @@ mod tests {
         let groups = group_entries_by_session(&entries, 60);
 
         assert_eq!(groups.len(), 1);
-        assert_group_ids(&groups, &["fallback-100"]);
+        assert_group_ids(&groups, &["__fallback__100"]);
         assert_eq!(groups[0].entries.len(), 1);
         assert_eq!(groups[0].entries[0].id, "e1");
     }
@@ -196,7 +201,7 @@ mod tests {
         let groups = group_entries_by_session(&entries, 60);
 
         assert_eq!(groups.len(), 1);
-        assert_group_ids(&groups, &["fallback-100"]);
+        assert_group_ids(&groups, &["__fallback__100"]);
         assert_eq!(groups[0].entries.len(), 3);
     }
 
@@ -211,7 +216,7 @@ mod tests {
         let groups = group_entries_by_session(&entries, 60);
 
         assert_eq!(groups.len(), 2);
-        assert_group_ids(&groups, &["fallback-100", "fallback-300"]);
+        assert_group_ids(&groups, &["__fallback__100", "__fallback__300"]);
         assert_eq!(groups[0].entries.len(), 2);
         assert_eq!(groups[1].entries.len(), 1);
     }
@@ -228,7 +233,7 @@ mod tests {
         let groups = group_entries_by_session(&entries, 30);
 
         assert_eq!(groups.len(), 2);
-        assert_group_ids(&groups, &["s1", "fallback-110"]);
+        assert_group_ids(&groups, &["s1", "__fallback__110"]);
         assert_eq!(groups[0].entries.len(), 2);
         assert_eq!(groups[1].entries.len(), 2);
     }
@@ -244,7 +249,7 @@ mod tests {
         let groups = group_entries_by_session(&entries, 60);
 
         assert_eq!(groups.len(), 1);
-        assert_group_ids(&groups, &["fallback-100"]);
+        assert_group_ids(&groups, &["__fallback__100"]);
 
         let ordered_ids: Vec<&str> = groups[0]
             .entries
@@ -265,8 +270,23 @@ mod tests {
         let groups = group_entries_by_session(&entries, 60);
 
         assert_eq!(groups.len(), 1);
-        assert_group_ids(&groups, &["fallback-100"]);
+        assert_group_ids(&groups, &["__fallback__100"]);
         assert_eq!(groups[0].entries.len(), 3);
+    }
+
+    #[test]
+    fn fallback_groups_interleave_chronologically_with_explicit_groups() {
+        let entries = vec![
+            make_entry("f1", 50, None),
+            make_entry("e1", 200, Some("s1")),
+            make_entry("f2", 60, None),
+        ];
+
+        let groups = group_entries_by_session(&entries, 60);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].session_id, "__fallback__50");
+        assert_eq!(groups[1].session_id, "s1");
     }
 
     #[test]
@@ -313,7 +333,10 @@ mod tests {
         let groups = group_entries_by_session(&entries, 0);
 
         assert_eq!(groups.len(), 3);
-        assert_group_ids(&groups, &["fallback-100", "fallback-101", "fallback-102"]);
+        assert_group_ids(
+            &groups,
+            &["__fallback__100", "__fallback__101", "__fallback__102"],
+        );
         assert_eq!(groups[0].entries.len(), 1);
         assert_eq!(groups[1].entries.len(), 1);
         assert_eq!(groups[2].entries.len(), 1);
@@ -330,7 +353,7 @@ mod tests {
         let groups = group_entries_by_session(&entries, 0);
 
         assert_eq!(groups.len(), 2);
-        assert_group_ids(&groups, &["fallback-100", "fallback-101"]);
+        assert_group_ids(&groups, &["__fallback__100", "__fallback__101"]);
 
         let first_ids: Vec<&str> = groups[0]
             .entries
