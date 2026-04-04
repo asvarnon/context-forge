@@ -444,35 +444,41 @@ fn cmd_query(
 
     match format {
         OutputFormat::Json => {
-            let importance_json: Vec<serde_json::Value> = importance_segments
-                .iter()
-                .map(|segment| {
-                    serde_json::json!({
-                        "text": &segment.text,
-                        "categories": segment
-                            .categories
-                            .iter()
-                            .map(category_title_case)
-                            .collect::<Vec<_>>(),
-                        "importance_score": segment.importance_score,
-                        "session_frequency": segment.session_frequency,
-                        "triggering_terms": &segment.triggering_terms,
-                        "session_id": &segment.session_id,
-                        "timestamp": segment.timestamp,
-                        "estimated_tokens": segment.token_estimate,
+            if should_inject_importance {
+                let importance_json: Vec<serde_json::Value> = importance_segments
+                    .iter()
+                    .map(|segment| {
+                        serde_json::json!({
+                            "text": &segment.text,
+                            "categories": segment
+                                .categories
+                                .iter()
+                                .map(category_title_case)
+                                .collect::<Vec<_>>(),
+                            "importance_score": segment.importance_score,
+                            "session_frequency": segment.session_frequency,
+                            "triggering_terms": &segment.triggering_terms,
+                            "session_id": &segment.session_id,
+                            "timestamp": segment.timestamp,
+                            "estimated_tokens": segment.token_estimate,
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            let output = serde_json::json!({
-                "version": 2,
-                "importance": importance_json,
-                "bm25": entries,
-            });
+                let output = serde_json::json!({
+                    "version": 2,
+                    "importance": importance_json,
+                    "bm25": entries,
+                });
 
-            let json =
-                serde_json::to_string_pretty(&output).map_err(|e| format!("json error: {e}"))?;
-            println!("{json}");
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| format!("json error: {e}"))?;
+                println!("{json}");
+            } else {
+                let json = serde_json::to_string_pretty(&entries)
+                    .map_err(|e| format!("json error: {e}"))?;
+                println!("{json}");
+            }
         }
         OutputFormat::Text => {
             if importance_segments.is_empty() {
@@ -1002,7 +1008,10 @@ fn run_importance_pipeline(
 
     let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_secs(),
-        Err(_) => return Vec::new(),
+        Err(err) => {
+            eprintln!("failed to compute current system time for importance pipeline: {err}");
+            return Vec::new();
+        }
     };
     #[allow(clippy::cast_possible_wrap)]
     let now_timestamp = now as i64;
