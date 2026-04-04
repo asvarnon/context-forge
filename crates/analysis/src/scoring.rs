@@ -97,6 +97,9 @@ pub fn score_passages(
 
     let mut segments: Vec<ImportanceSegment> = classified
         .iter()
+        // NOTE: `superseded` means "superseded in at least one category" - a multi-category
+        // passage may still be the latest representative of another category. Per-category
+        // supersession tracking is a known improvement tracked separately.
         .filter(|passage| !passage.superseded)
         .map(|passage| {
             let recurrence_score = passage
@@ -385,7 +388,12 @@ mod tests {
 
         let mut config = default_config();
         config.importance_half_life_secs = 0.0;
-        let result_zero = score_passages(&[passage.clone()], &recurrence_map, &config, NOW);
+        let result_zero = score_passages(
+            std::slice::from_ref(&passage),
+            &recurrence_map,
+            &config,
+            NOW,
+        );
         assert!((result_zero[0].recency_factor - 0.5).abs() < 1e-12);
 
         config.importance_half_life_secs = f64::NAN;

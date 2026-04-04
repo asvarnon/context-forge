@@ -17,3 +17,4 @@ out/
 
 # Validation scripts (throwaway diagnostics)
 scripts/validate_*.py
+__pycache__/
