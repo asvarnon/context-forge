@@ -14,6 +14,12 @@ pub struct ExtractionConfig {
     pub context_window: usize,
     /// Whether to deduplicate extracted passages by content hash.
     pub dedup_enabled: bool,
+    /// Maximum number of sentences allowed in a single extracted passage.
+    ///
+    /// If a merged range exceeds this value, it is split into sentence-boundary
+    /// chunks of at most this size. A value of `0` is treated as a per-sentence
+    /// cap (each sentence becomes its own chunk).
+    pub max_passage_sentences: usize,
 }
 
 impl Default for ExtractionConfig {
@@ -21,6 +27,7 @@ impl Default for ExtractionConfig {
         Self {
             context_window: 1,
             dedup_enabled: true,
+            max_passage_sentences: 6,
         }
     }
 }
@@ -42,7 +49,11 @@ pub struct ExtractedPassage {
     pub text: String,
     /// Entry ID this passage came from.
     pub source_entry_id: String,
-    /// High-recurrence terms that triggered extraction.
+    /// High-recurrence terms present in this passage.
+    ///
+    /// For passages produced by splitting an over-long merged range, terms are
+    /// re-evaluated: only terms whose lowercased form appears in the chunk's
+    /// sentences are included, not all terms from the original merged window.
     pub triggering_terms: Vec<String>,
     /// Content hash for within-session deduplication only.
     /// Computed with [`std::collections::hash_map::DefaultHasher`],
@@ -89,7 +100,14 @@ pub fn extract_passages(
             continue;
         }
 
-        let ranges = collect_merged_ranges(&sentences, &normalized_terms, config.context_window);
+        let merged_ranges =
+            collect_merged_ranges(&sentences, &normalized_terms, config.context_window);
+        let ranges = split_ranges_by_max_passage_sentences(
+            &sentences,
+            &normalized_terms,
+            merged_ranges,
+            config.max_passage_sentences,
+        );
         for range in ranges {
             let passage_text = sentences[range.start..=range.end].join("\n");
             let trimmed_text = passage_text.trim().to_string();
@@ -269,6 +287,86 @@ fn collect_merged_ranges(
     merged
 }
 
+fn split_ranges_by_max_passage_sentences(
+    sentences: &[String],
+    normalized_terms: &[(String, String)],
+    ranges: Vec<WindowRange>,
+    max_passage_sentences: usize,
+) -> Vec<WindowRange> {
+    if ranges.is_empty() {
+        return ranges;
+    }
+
+    let chunk_size = max_passage_sentences.max(1);
+
+    let mut split_ranges: Vec<WindowRange> = Vec::new();
+
+    for range in ranges {
+        let span_len = range.end.saturating_sub(range.start) + 1;
+        if span_len <= chunk_size {
+            split_ranges.push(range);
+            continue;
+        }
+
+        let mut chunk_start = range.start;
+        while chunk_start <= range.end {
+            let chunk_end = usize::min(
+                range.end,
+                chunk_start.saturating_add(chunk_size).saturating_sub(1),
+            );
+
+            let terms = collect_terms_in_range(sentences, normalized_terms, chunk_start, chunk_end);
+            if !terms.is_empty() {
+                split_ranges.push(WindowRange {
+                    start: chunk_start,
+                    end: chunk_end,
+                    terms,
+                });
+            }
+
+            chunk_start = chunk_end.saturating_add(1);
+        }
+    }
+
+    split_ranges
+}
+
+fn collect_terms_in_range(
+    sentences: &[String],
+    normalized_terms: &[(String, String)],
+    start: usize,
+    end: usize,
+) -> Vec<String> {
+    debug_assert!(
+        end < sentences.len(),
+        "chunk_end out of bounds: {end} >= {}",
+        sentences.len()
+    );
+
+    // Pre-compute lowercased sentences once, then filter terms against the slice.
+    let lower_sentences: Vec<String> = sentences[start..=end]
+        .iter()
+        .map(|sentence| sentence.to_lowercase())
+        .collect();
+
+    let mut matched_terms: Vec<String> = normalized_terms
+        .iter()
+        .filter_map(|(original, lower)| {
+            let has_match = lower_sentences
+                .iter()
+                .any(|sentence| sentence.contains(lower));
+            if has_match {
+                Some(original.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    matched_terms.sort();
+    matched_terms
+}
+
 fn hash_text(text: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
@@ -344,6 +442,7 @@ mod tests {
         let config = ExtractionConfig {
             context_window: 0,
             dedup_enabled: true,
+            max_passage_sentences: 6,
         };
 
         let passages = extract_passages(&entries, &default_terms("context"), &config);
@@ -391,6 +490,7 @@ mod tests {
         let config = ExtractionConfig {
             context_window: 0,
             dedup_enabled: true,
+            max_passage_sentences: 6,
         };
 
         let passages = extract_passages(&entries, &terms, &config);
@@ -466,6 +566,7 @@ mod tests {
         let config = ExtractionConfig {
             context_window: 0,
             dedup_enabled: true,
+            max_passage_sentences: 6,
         };
 
         let passages = extract_passages(&entries, &terms, &config);
@@ -479,6 +580,7 @@ mod tests {
         let config = ExtractionConfig {
             context_window: 0,
             dedup_enabled: true,
+            max_passage_sentences: 6,
         };
 
         let passages = extract_passages(&entries, &terms, &config);
@@ -510,6 +612,7 @@ mod tests {
         let config = ExtractionConfig {
             context_window: 0,
             dedup_enabled: true,
+            max_passage_sentences: 6,
         };
 
         let passages = extract_passages(&entries, &default_terms("context"), &config);
@@ -531,6 +634,7 @@ mod tests {
         let config = ExtractionConfig {
             context_window: 1,
             dedup_enabled: false,
+            max_passage_sentences: 6,
         };
 
         let passages = extract_passages(&entries, &default_terms("context"), &config);
@@ -549,5 +653,74 @@ mod tests {
         let sentences = split_into_sentences("Edit file.rs for changes.");
         assert_eq!(sentences.len(), 1);
         assert_eq!(sentences[0], "Edit file.rs for changes.");
+    }
+
+    #[test]
+    fn extract_over_cap_splits_into_multiple_passages() {
+        let entries = single_entry(
+            "Context one. Context two. Context three. Context four. Context five. Context six. Context seven. Context eight. Context nine. Context ten.",
+        );
+        let config = ExtractionConfig {
+            context_window: 0,
+            dedup_enabled: true,
+            max_passage_sentences: 6,
+        };
+
+        let passages = extract_passages(&entries, &default_terms("context"), &config);
+        assert_eq!(passages.len(), 2);
+        assert_eq!(passages[0].text.lines().count(), 6);
+        assert_eq!(passages[1].text.lines().count(), 4);
+    }
+
+    #[test]
+    fn extract_cap_zero_emits_single_sentence_passages() {
+        let entries = single_entry("Context one. Context two. Context three.");
+        let config = ExtractionConfig {
+            context_window: 1,
+            dedup_enabled: true,
+            max_passage_sentences: 0,
+        };
+
+        let passages = extract_passages(&entries, &default_terms("context"), &config);
+        assert_eq!(passages.len(), 3);
+        assert_eq!(passages[0].text, "Context one.");
+        assert_eq!(passages[1].text, "Context two.");
+        assert_eq!(passages[2].text, "Context three.");
+    }
+
+    #[test]
+    fn extract_split_re_evaluates_triggering_terms_per_chunk() {
+        let entries = single_entry(
+            "One. Alpha signal. Three. Four. Five. Six. Seven. Eight. Nine. Beta signal. Eleven. Twelve.",
+        );
+        let terms = vec!["alpha".to_string(), "beta".to_string()];
+        let config = ExtractionConfig {
+            context_window: 5,
+            dedup_enabled: true,
+            max_passage_sentences: 6,
+        };
+
+        let passages = extract_passages(&entries, &terms, &config);
+        assert_eq!(passages.len(), 2);
+        assert_eq!(passages[0].triggering_terms, vec!["alpha".to_string()]);
+        assert_eq!(passages[1].triggering_terms, vec!["beta".to_string()]);
+    }
+
+    #[test]
+    fn extract_split_discards_chunks_without_matching_terms() {
+        let entries = single_entry(
+            "Alpha signal. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve. Thirteen. Fourteen. Fifteen. Sixteen. Seventeen. Beta signal.",
+        );
+        let terms = vec!["alpha".to_string(), "beta".to_string()];
+        let config = ExtractionConfig {
+            context_window: 8,
+            dedup_enabled: true,
+            max_passage_sentences: 6,
+        };
+
+        let passages = extract_passages(&entries, &terms, &config);
+        assert_eq!(passages.len(), 2);
+        assert_eq!(passages[0].triggering_terms, vec!["alpha".to_string()]);
+        assert_eq!(passages[1].triggering_terms, vec!["beta".to_string()]);
     }
 }
