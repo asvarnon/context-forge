@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -7,8 +8,15 @@ use std::{fs, process};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use cf_analysis::{
+    build_session_term_maps, classify_passages, compute_recurrence, extract_passages,
+    pack_segments, score_passages, strip_execution_artifacts, ClassificationConfig,
+    ExtractionConfig, ExtractionEntry, Lexicons, PassageContext, PrefilterConfig, RecurrenceConfig,
+    ScoringConfig, Tokenizer, TokenizerConfig,
+};
 use cf_core::config::DEFAULT_RECENCY_HALF_LIFE_SECS;
 use cf_core::engine::MATCH_ALL_QUERY;
+use cf_core::session::group_entries_by_session;
 use cf_core::traits::ContextStorage;
 use cf_core::{ContextEngine, CoreConfig, EntryKind, EvictionPolicy, SaveOptions};
 use cf_storage::open_storage;
@@ -127,6 +135,24 @@ enum Command {
         #[arg(long, default_value_os_t = default_db_path())]
         db: PathBuf,
     },
+    /// Run the importance-detection pipeline and output ranked segments.
+    Analyze {
+        /// Path to the SQLite database file.
+        #[arg(long, default_value_os_t = default_db_path())]
+        db: PathBuf,
+        /// Maximum number of segments to return.
+        #[arg(long, default_value_t = 20)]
+        top_k: usize,
+        /// Token budget for segment packing.
+        #[arg(long, default_value_t = 2048)]
+        token_budget: usize,
+        /// Output format.
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+        /// Include pipeline statistics in output.
+        #[arg(long)]
+        stats: bool,
+    },
 }
 
 fn main() {
@@ -174,6 +200,13 @@ fn run(cli: Cli) -> Result<(), String> {
         } => cmd_query(&db, query.as_deref(), top_k, token_budget, &format),
         Command::Clear { db } => cmd_clear(&db),
         Command::Info { db } => cmd_info(&db),
+        Command::Analyze {
+            db,
+            top_k,
+            token_budget,
+            format,
+            stats,
+        } => cmd_analyze(&db, top_k, token_budget, &format, stats),
     }
 }
 
@@ -372,6 +405,331 @@ fn cmd_info(db: &Path) -> Result<(), String> {
     println!("schema:   v{version}");
     println!("db size:  {size} bytes");
     println!("db path:  {}", db.display());
+    Ok(())
+}
+
+fn cmd_analyze(
+    db: &Path,
+    top_k: usize,
+    token_budget: usize,
+    format: &OutputFormat,
+    stats: bool,
+) -> Result<(), String> {
+    ensure_db_dir(db)?;
+    let (storage, _) = open_storage(db, DEFAULT_MAX_ENTRIES).map_err(|e| e.to_string())?;
+
+    // Step 1: Load all entries
+    let entries = storage.get_all().map_err(|e| e.to_string())?;
+    if entries.is_empty() {
+        match format {
+            OutputFormat::Json => {
+                let stats_value = if stats {
+                    serde_json::json!({
+                        "entry_count": 0,
+                        "session_count": 0,
+                        "high_recurrence_terms": 0,
+                        "passages_extracted": 0,
+                        "segments_scored": 0,
+                        "segments_packed": 0,
+                    })
+                } else {
+                    serde_json::Value::Null
+                };
+                let output = serde_json::json!({"segments": [], "stats": stats_value});
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output)
+                        .map_err(|e| format!("json error: {e}"))?
+                );
+            }
+            OutputFormat::Text => println!("No entries in database."),
+        }
+        return Ok(());
+    }
+    let entry_count = entries.len();
+
+    // Step 2: Pre-filter
+    let prefilter_config = PrefilterConfig::default();
+    let filtered: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| {
+            let clean = strip_execution_artifacts(&e.content, &prefilter_config);
+            (e.id.clone(), clean)
+        })
+        .filter(|(_, content)| !content.trim().is_empty())
+        .collect();
+    let filtered_count = filtered.len();
+
+    // Step 3: Initialize tokenizer (used by Step 5)
+    let tokenizer = Tokenizer::new(&TokenizerConfig::default());
+
+    // Step 4: Group entries by session
+    let session_groups = group_entries_by_session(&entries, 3600);
+    let session_count = session_groups.len();
+
+    // Step 5: Build per-session term count maps for recurrence
+    let session_contents: Vec<Vec<&str>> = session_groups
+        .iter()
+        .map(|group| group.entries.iter().map(|e| e.content.as_str()).collect())
+        .collect();
+    let session_term_maps =
+        build_session_term_maps(&session_contents, &tokenizer, &prefilter_config);
+
+    // Step 6: Compute recurrence
+    let recurrence_config = RecurrenceConfig::default();
+    let recurrence_results = compute_recurrence(&session_term_maps, &recurrence_config);
+    let recurrence_term_count = recurrence_results.len();
+
+    if recurrence_results.is_empty() {
+        match format {
+            OutputFormat::Json => {
+                let stats_value = if stats {
+                    serde_json::json!({
+                        "entry_count": entry_count,
+                        "filtered_entries": filtered_count,
+                        "session_count": session_count,
+                        "high_recurrence_terms": 0,
+                        "passages_extracted": 0,
+                        "segments_scored": 0,
+                        "segments_packed": 0,
+                    })
+                } else {
+                    serde_json::Value::Null
+                };
+                let output = serde_json::json!({
+                    "segments": [],
+                    "stats": stats_value,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output)
+                        .map_err(|e| format!("json error: {e}"))?
+                );
+            }
+            OutputFormat::Text => {
+                println!("No high-recurrence terms found across {session_count} sessions.");
+                if stats {
+                    println!("\n--- Stats ---");
+                    println!("Entries:              {entry_count}");
+                    println!("Filtered entries:    {filtered_count}");
+                    println!("Sessions:             {session_count}");
+                    println!("High-recurrence terms: 0");
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Build recurrence map for scoring
+    let recurrence_map: HashMap<String, cf_analysis::RecurrenceResult> = recurrence_results
+        .into_iter()
+        .map(|r| (r.term.clone(), r))
+        .collect();
+
+    let high_recurrence_terms: Vec<String> = recurrence_map.keys().cloned().collect();
+
+    // Step 7: Extract passages
+    let extraction_entries: Vec<ExtractionEntry> = filtered
+        .iter()
+        .map(|(id, content)| ExtractionEntry {
+            entry_id: id.clone(),
+            content: content.clone(),
+        })
+        .collect();
+    let extraction_config = ExtractionConfig::default();
+    let passages = extract_passages(
+        &extraction_entries,
+        &high_recurrence_terms,
+        &extraction_config,
+    );
+    let passage_count = passages.len();
+
+    if passages.is_empty() {
+        match format {
+            OutputFormat::Json => {
+                let stats_value = if stats {
+                    serde_json::json!({
+                        "entry_count": entry_count,
+                        "filtered_entries": filtered_count,
+                        "session_count": session_count,
+                        "high_recurrence_terms": recurrence_term_count,
+                        "passages_extracted": 0,
+                        "segments_scored": 0,
+                        "segments_packed": 0,
+                    })
+                } else {
+                    serde_json::Value::Null
+                };
+                let output = serde_json::json!({
+                    "segments": [],
+                    "stats": stats_value,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output)
+                        .map_err(|e| format!("json error: {e}"))?
+                );
+            }
+            OutputFormat::Text => {
+                println!("No passages extracted from {filtered_count} entries.");
+                if stats {
+                    println!("\n--- Stats ---");
+                    println!("Entries:              {entry_count}");
+                    println!("Filtered entries:    {filtered_count}");
+                    println!("Sessions:             {session_count}");
+                    println!("High-recurrence terms: {recurrence_term_count}");
+                    println!("Passages extracted:   0");
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("system time error: {e}"))?
+        .as_secs();
+    #[allow(clippy::cast_possible_wrap)]
+    let now_timestamp = now as i64;
+
+    // Step 8: Build PassageContext for classification
+    // Map entry_id -> (session_id, timestamp) for bridging
+    let entry_session_map: HashMap<String, (String, i64)> = session_groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .entries
+                .iter()
+                .map(move |e| (e.id.clone(), (group.session_id.clone(), e.timestamp)))
+        })
+        .collect();
+
+    let passage_contexts: Vec<PassageContext> = passages
+        .iter()
+        .map(|p| {
+            let (session_id, timestamp) = entry_session_map
+                .get(&p.source_entry_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "entry_session_map missing entry: {}",
+                        p.source_entry_id
+                    );
+                    ("unknown".to_string(), now_timestamp)
+                });
+            PassageContext {
+                passage_text: p.text.clone(),
+                triggering_terms: p.triggering_terms.clone(),
+                session_id,
+                timestamp,
+            }
+        })
+        .collect();
+
+    // Step 9: Classify
+    let lexicons = Lexicons::default();
+    let classification_config = ClassificationConfig::default();
+    let classified = classify_passages(&passage_contexts, &lexicons, &classification_config);
+
+    // Step 10: Score
+    let scoring_config = ScoringConfig::default();
+    let segments = score_passages(&classified, &recurrence_map, &scoring_config, now_timestamp);
+    let scored_count = segments.len();
+
+    // Step 11: Pack into token budget
+    let packed = pack_segments(&segments, token_budget);
+    let packed_count = packed.len();
+
+    // Apply top_k limit
+    let final_segments: Vec<&cf_analysis::ImportanceSegment> = packed.iter().take(top_k).collect();
+
+    // Output
+    match format {
+        OutputFormat::Json => {
+            let segments_json: Vec<serde_json::Value> = final_segments
+                .iter()
+                .enumerate()
+                .map(|(i, seg)| {
+                    serde_json::json!({
+                        "rank": i + 1,
+                        "text": &seg.text,
+                        "importance_score": seg.importance_score,
+                        "recurrence_score": seg.recurrence_score,
+                        "category_weight": seg.category_weight,
+                        "recency_factor": seg.recency_factor,
+                        "categories": seg.categories.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>(),
+                        "triggering_terms": &seg.triggering_terms,
+                        "session_id": &seg.session_id,
+                        "token_estimate": seg.token_estimate,
+                    })
+                })
+                .collect();
+
+            let stats_value = if stats {
+                serde_json::json!({
+                    "entry_count": entry_count,
+                    "filtered_entries": filtered_count,
+                    "session_count": session_count,
+                    "high_recurrence_terms": recurrence_term_count,
+                    "passages_extracted": passage_count,
+                    "segments_scored": scored_count,
+                    "segments_packed": packed_count,
+                })
+            } else {
+                serde_json::Value::Null
+            };
+
+            let output = serde_json::json!({
+                "segments": segments_json,
+                "stats": stats_value,
+            });
+
+            let json =
+                serde_json::to_string_pretty(&output).map_err(|e| format!("json error: {e}"))?;
+            println!("{json}");
+        }
+        OutputFormat::Text => {
+            for (i, seg) in final_segments.iter().enumerate() {
+                let categories: Vec<String> =
+                    seg.categories.iter().map(|c| format!("{c:?}")).collect();
+                let cat_str = if categories.is_empty() {
+                    "Uncategorized".to_string()
+                } else {
+                    categories.join(", ")
+                };
+
+                println!(
+                    "#{} [score: {:.4}] [{}]",
+                    i + 1,
+                    seg.importance_score,
+                    cat_str
+                );
+                println!(
+                    "  Session: {} | Tokens: ~{}",
+                    seg.session_id, seg.token_estimate
+                );
+                println!("  Terms: {}", seg.triggering_terms.join(", "));
+                println!("  {}", seg.text.replace('\n', "\n  "));
+                if i < final_segments.len() - 1 {
+                    println!("---");
+                }
+            }
+
+            if stats {
+                println!("\n--- Stats ---");
+                println!("Entries:              {entry_count}");
+                println!("Filtered entries:    {filtered_count}");
+                println!("Sessions:             {session_count}");
+                println!("High-recurrence terms: {recurrence_term_count}");
+                println!("Passages extracted:   {passage_count}");
+                println!("Segments scored:      {scored_count}");
+                println!("Segments packed:      {packed_count}");
+                println!("Segments returned:    {}", final_segments.len());
+            }
+        }
+    }
+
     Ok(())
 }
 
