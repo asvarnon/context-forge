@@ -464,7 +464,7 @@ fn cmd_analyze(
     let tokenizer = Tokenizer::new(&TokenizerConfig::default());
 
     // Step 4: Group entries by session
-    let session_groups = group_entries_by_session(&entries, 3600);
+    let session_groups = group_entries_by_session(&entries, 180);
     let session_count = session_groups.len();
 
     // Step 5: Build per-session term count maps for recurrence
