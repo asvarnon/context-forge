@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::scoring::ScoringConfig;
 
 /// Configuration for progressive injection policy.
@@ -44,14 +46,14 @@ pub fn scale_budget(
 
     let scale = 1.0 + (count - 1) as f64 * config.escalation_factor;
     let scaled = base_budget as f64 * scale;
-    let rounded = scaled.round();
+    let ceiled = scaled.ceil();
 
-    let mut result = if !rounded.is_finite() || rounded <= 0.0 {
+    let mut result = if !ceiled.is_finite() || ceiled <= 0.0 {
         base_budget
-    } else if rounded >= usize::MAX as f64 {
+    } else if ceiled >= usize::MAX as f64 {
         usize::MAX
     } else {
-        rounded as usize
+        ceiled as usize
     };
 
     if let Some(cap) = config.max_budget_cap {
@@ -64,37 +66,41 @@ pub fn scale_budget(
 /// Return a `ScoringConfig` with category weights redistributed
 /// according to the compaction-level priority table.
 ///
-/// Weight values (1.5, 1.3, 1.2, 1.0) are reassigned by priority order:
-/// - Count 0-1: Corrective > Decisive > Stateful > Reinforcing (default)
+/// For count <= 1, weights are left unchanged.
+/// For count == 2 and count >= 3, existing category weights from `base`
+/// are sorted descending and reassigned by priority order:
 /// - Count 2: Reinforcing > Corrective > Stateful > Decisive
 /// - Count 3+: Reinforcing > Stateful > Corrective > Decisive
 ///
 /// `uncategorized_weight` and `importance_half_life_secs` are preserved from `base`.
 #[must_use]
 pub fn adjust_weights(base: &ScoringConfig, compaction_count: Option<i64>) -> ScoringConfig {
-    let mut adjusted = base.clone();
     let count = compaction_count.unwrap_or(1);
+    if count <= 1 {
+        return base.clone();
+    }
+
+    let mut adjusted = base.clone();
+    let mut weights = [
+        base.corrective_weight,
+        base.decisive_weight,
+        base.stateful_weight,
+        base.reinforcing_weight,
+    ];
+    weights.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
 
     if count == 2 {
-        adjusted.reinforcing_weight = 1.5;
-        adjusted.corrective_weight = 1.3;
-        adjusted.stateful_weight = 1.2;
-        adjusted.decisive_weight = 1.0;
+        adjusted.reinforcing_weight = weights[0];
+        adjusted.corrective_weight = weights[1];
+        adjusted.stateful_weight = weights[2];
+        adjusted.decisive_weight = weights[3];
         return adjusted;
     }
 
-    if count >= 3 {
-        adjusted.reinforcing_weight = 1.5;
-        adjusted.stateful_weight = 1.3;
-        adjusted.corrective_weight = 1.2;
-        adjusted.decisive_weight = 1.0;
-        return adjusted;
-    }
-
-    adjusted.corrective_weight = 1.5;
-    adjusted.decisive_weight = 1.3;
-    adjusted.stateful_weight = 1.2;
-    adjusted.reinforcing_weight = 1.0;
+    adjusted.reinforcing_weight = weights[0];
+    adjusted.stateful_weight = weights[1];
+    adjusted.corrective_weight = weights[2];
+    adjusted.decisive_weight = weights[3];
     adjusted
 }
 
@@ -219,16 +225,20 @@ mod tests {
 
     #[test]
     fn adjust_weights_preserves_uncategorized() {
-        let mut base = ScoringConfig::default();
-        base.uncategorized_weight = 0.75;
+        let base = ScoringConfig {
+            uncategorized_weight: 0.75,
+            ..ScoringConfig::default()
+        };
         let adjusted = adjust_weights(&base, Some(3));
         assert!((adjusted.uncategorized_weight - 0.75).abs() < f64::EPSILON);
     }
 
     #[test]
     fn adjust_weights_preserves_half_life() {
-        let mut base = ScoringConfig::default();
-        base.importance_half_life_secs = 123_456.0;
+        let base = ScoringConfig {
+            importance_half_life_secs: 123_456.0,
+            ..ScoringConfig::default()
+        };
         let adjusted = adjust_weights(&base, Some(3));
         assert!((adjusted.importance_half_life_secs - 123_456.0).abs() < f64::EPSILON);
     }
