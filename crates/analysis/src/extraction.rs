@@ -19,6 +19,13 @@ pub struct ExtractionConfig {
     /// If a merged range exceeds this value, it is split into sentence-boundary
     /// chunks of at most this size. A value of `0` is treated as a per-sentence
     /// cap (each sentence becomes its own chunk).
+    ///
+    /// After splitting, each chunk is re-evaluated and chunks that do not
+    /// contain any matching high-recurrence term are discarded. As a result,
+    /// when `context_window` is larger than `max_passage_sentences`, some
+    /// context-only sentences may be dropped and the effective surrounding
+    /// context in the returned passages can be smaller than the original
+    /// merged window.
     pub max_passage_sentences: usize,
 }
 
@@ -338,9 +345,18 @@ fn collect_terms_in_range(
     end: usize,
 ) -> Vec<String> {
     debug_assert!(
+        start < sentences.len(),
+        "chunk_start out of bounds: {start} >= {}",
+        sentences.len()
+    );
+    debug_assert!(
         end < sentences.len(),
         "chunk_end out of bounds: {end} >= {}",
         sentences.len()
+    );
+    debug_assert!(
+        start <= end,
+        "invalid chunk range: start ({start}) > end ({end})"
     );
 
     // Pre-compute lowercased sentences once, then filter terms against the slice.
@@ -364,6 +380,7 @@ fn collect_terms_in_range(
         .collect();
 
     matched_terms.sort();
+    matched_terms.dedup();
     matched_terms
 }
 
