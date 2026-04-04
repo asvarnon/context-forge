@@ -57,6 +57,8 @@ pub struct ImportanceSegment {
     pub recency_factor: f64,
     /// High-recurrence terms that triggered extraction.
     pub triggering_terms: Vec<String>,
+    /// Maximum number of sessions any triggering term appears in.
+    pub session_frequency: usize,
     /// Session ID this passage belongs to.
     pub session_id: String,
     /// Source entry timestamp (Unix seconds).
@@ -110,6 +112,14 @@ pub fn score_passages(
                 .max_by(f64::total_cmp)
                 .unwrap_or(0.0);
 
+            let session_frequency = passage
+                .triggering_terms
+                .iter()
+                .filter_map(|term| recurrence_map.get(term))
+                .map(|result| result.session_frequency)
+                .max()
+                .unwrap_or(0);
+
             let category_weight = category_weight(&passage.categories, config);
 
             let age_seconds = (now_timestamp - passage.timestamp).max(0) as f64;
@@ -124,6 +134,7 @@ pub fn score_passages(
                 category_weight,
                 recency_factor,
                 triggering_terms: passage.triggering_terms.clone(),
+                session_frequency,
                 session_id: passage.session_id.clone(),
                 timestamp: passage.timestamp,
                 token_estimate: estimate_tokens(&passage.text),
@@ -262,6 +273,7 @@ mod tests {
             category_weight: 0.5,
             recency_factor: 1.0,
             triggering_terms: Vec::new(),
+            session_frequency: 0,
             session_id: "session-1".to_string(),
             timestamp: NOW,
             token_estimate,
@@ -327,6 +339,44 @@ mod tests {
         let result = score_passages(&[passage], &recurrence_map, &default_config(), NOW);
         let segment = &result[0];
         assert!((segment.recurrence_score - 0.667).abs() < 1e-12);
+    }
+
+    #[test]
+    fn score_passages_session_frequency_uses_max_across_terms() {
+        let passage = make_passage("text", Vec::new(), vec!["term_a", "term_b"], NOW, false);
+
+        let recurrence_map = HashMap::from([
+            (
+                "term_a".to_string(),
+                RecurrenceResult {
+                    term: "term_a".to_string(),
+                    session_frequency: 2,
+                    recurrence_score: 0.4,
+                },
+            ),
+            (
+                "term_b".to_string(),
+                RecurrenceResult {
+                    term: "term_b".to_string(),
+                    session_frequency: 5,
+                    recurrence_score: 0.6,
+                },
+            ),
+        ]);
+
+        let result = score_passages(&[passage], &recurrence_map, &default_config(), NOW);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].session_frequency, 5);
+    }
+
+    #[test]
+    fn score_passages_session_frequency_zero_when_terms_absent_from_map() {
+        let passage = make_passage("text", Vec::new(), vec!["missing_term"], NOW, false);
+        let recurrence_map = make_recurrence_map(&[("other", 0.7)]);
+
+        let result = score_passages(&[passage], &recurrence_map, &default_config(), NOW);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].session_frequency, 0);
     }
 
     #[test]

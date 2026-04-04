@@ -11,14 +11,15 @@ use clap::{Parser, Subcommand, ValueEnum};
 use cf_analysis::{
     adjust_weights, build_session_term_maps, classify_passages, compute_recurrence,
     extract_passages, pack_segments, scale_budget, score_passages, strip_execution_artifacts,
-    ClassificationConfig, ExtractionConfig, ExtractionEntry, InjectionConfig, Lexicons,
-    PassageContext, PrefilterConfig, RecurrenceConfig, ScoringConfig, Tokenizer, TokenizerConfig,
+    ClassificationConfig, ExtractionConfig, ExtractionEntry, ImportanceCategory, ImportanceSegment,
+    InjectionConfig, Lexicons, PassageContext, PrefilterConfig, RecurrenceConfig, ScoringConfig,
+    Tokenizer, TokenizerConfig,
 };
 use cf_core::config::DEFAULT_RECENCY_HALF_LIFE_SECS;
 use cf_core::engine::MATCH_ALL_QUERY;
 use cf_core::session::group_entries_by_session;
 use cf_core::traits::ContextStorage;
-use cf_core::{ContextEngine, CoreConfig, EntryKind, EvictionPolicy, SaveOptions};
+use cf_core::{ContextEngine, ContextEntry, CoreConfig, EntryKind, EvictionPolicy, SaveOptions};
 use cf_storage::open_storage;
 
 mod transcript;
@@ -31,6 +32,15 @@ const DEFAULT_TOKEN_BUDGET: usize = 16_000;
 
 /// Default timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
+/// Default token budget for the importance injection block.
+const DEFAULT_IMPORTANCE_BUDGET: usize = 512;
+
+/// Header for the importance context block in text output.
+const IMPORTANCE_HEADER: &str = "=== Important Context ===";
+
+/// Separator between output sections in text format.
+const SECTION_SEPARATOR: &str = "---";
 
 /// Maximum allowed length for a session_id from stdin JSON.
 const MAX_SESSION_ID_LEN: usize = 512;
@@ -62,6 +72,19 @@ struct Cli {
 enum OutputFormat {
     Json,
     Text,
+}
+
+#[derive(Clone, ValueEnum)]
+/// Session start trigger source for importance injection strategy.
+enum QuerySource {
+    /// First launch - broad importance context with default scoring weights.
+    Startup,
+    /// Resumed session - same as startup (broad context).
+    Resume,
+    /// Post-compaction - progressive injection with scaled budget and adjusted weights.
+    Compact,
+    /// Post-clear - skip importance injection entirely (fresh start).
+    Clear,
 }
 
 /// Entry kind selectable from the CLI.
@@ -122,6 +145,12 @@ enum Command {
         /// Output format.
         #[arg(long, default_value = "json")]
         format: OutputFormat,
+        /// SessionStart trigger source. Controls importance injection strategy.
+        #[arg(long, value_enum)]
+        source: Option<QuerySource>,
+        /// Fixed token ceiling for the importance injection block. Default: 512 tokens.
+        #[arg(long, default_value_t = DEFAULT_IMPORTANCE_BUDGET)]
+        importance_budget: usize,
     },
     /// Delete all entries from the store.
     Clear {
@@ -197,7 +226,17 @@ fn run(cli: Cli) -> Result<(), String> {
             top_k,
             token_budget,
             format,
-        } => cmd_query(&db, query.as_deref(), top_k, token_budget, &format),
+            source,
+            importance_budget,
+        } => cmd_query(
+            &db,
+            query.as_deref(),
+            top_k,
+            token_budget,
+            &format,
+            source.as_ref(),
+            importance_budget,
+        ),
         Command::Clear { db } => cmd_clear(&db),
         Command::Info { db } => cmd_info(&db),
         Command::Analyze {
@@ -327,6 +366,8 @@ fn cmd_query(
     top_k: Option<usize>,
     token_budget: Option<usize>,
     format: &OutputFormat,
+    source: Option<&QuerySource>,
+    importance_budget: usize,
 ) -> Result<(), String> {
     ensure_db_dir(db)?;
 
@@ -350,6 +391,39 @@ fn cmd_query(
         .recency_half_life_hours
         .map_or(DEFAULT_RECENCY_HALF_LIFE_SECS, |h| h * 3600.0);
 
+    let should_inject_importance = match source {
+        None | Some(QuerySource::Clear) => false,
+        Some(QuerySource::Startup) | Some(QuerySource::Resume) | Some(QuerySource::Compact) => {
+            importance_budget > 0
+        }
+    };
+
+    let bm25_budget = if should_inject_importance {
+        effective_budget.saturating_sub(importance_budget.min(effective_budget))
+    } else {
+        effective_budget
+    };
+
+    let importance_segments = if should_inject_importance {
+        let (storage, _) = open_storage(db, DEFAULT_MAX_ENTRIES).map_err(|e| e.to_string())?;
+        let all_entries = storage.get_all().map_err(|e| e.to_string())?;
+
+        if matches!(source, Some(QuerySource::Compact)) {
+            let max_compaction_count = all_entries.iter().filter_map(|e| e.compaction_count).max();
+            let effective_importance_budget = scale_budget(
+                importance_budget,
+                max_compaction_count,
+                &InjectionConfig::default(),
+            );
+            let scoring_config = adjust_weights(&ScoringConfig::default(), max_compaction_count);
+            run_importance_pipeline(&all_entries, &scoring_config, effective_importance_budget)
+        } else {
+            run_importance_pipeline(&all_entries, &ScoringConfig::default(), importance_budget)
+        }
+    } else {
+        Vec::new()
+    };
+
     let engine = make_engine(
         db,
         DEFAULT_MAX_ENTRIES,
@@ -363,24 +437,101 @@ fn cmd_query(
     };
 
     let mut entries = engine
-        .assemble(&query_str, effective_budget)
+        .assemble(&query_str, bm25_budget)
         .map_err(|e| e.to_string())?;
 
     entries.truncate(effective_top_k);
 
     match format {
         OutputFormat::Json => {
-            let json =
-                serde_json::to_string_pretty(&entries).map_err(|e| format!("json error: {e}"))?;
-            println!("{json}");
+            if should_inject_importance {
+                let importance_json: Vec<serde_json::Value> = importance_segments
+                    .iter()
+                    .map(|segment| {
+                        serde_json::json!({
+                            "text": &segment.text,
+                            "categories": segment
+                                .categories
+                                .iter()
+                                .map(category_title_case)
+                                .collect::<Vec<_>>(),
+                            "importance_score": segment.importance_score,
+                            "session_frequency": segment.session_frequency,
+                            "triggering_terms": &segment.triggering_terms,
+                            "session_id": &segment.session_id,
+                            "timestamp": segment.timestamp,
+                            "estimated_tokens": segment.token_estimate,
+                        })
+                    })
+                    .collect();
+
+                let output = serde_json::json!({
+                    "version": 2,
+                    "importance": importance_json,
+                    "bm25": entries,
+                });
+
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| format!("json error: {e}"))?;
+                println!("{json}");
+            } else {
+                let json = serde_json::to_string_pretty(&entries)
+                    .map_err(|e| format!("json error: {e}"))?;
+                println!("{json}");
+            }
         }
         OutputFormat::Text => {
-            let texts: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
-            println!("{}", texts.join("\n---\n"));
+            if importance_segments.is_empty() {
+                let texts: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
+                println!("{}", texts.join(&format!("\n{SECTION_SEPARATOR}\n")));
+            } else {
+                println!("{IMPORTANCE_HEADER}\n");
+                for (idx, segment) in importance_segments.iter().enumerate() {
+                    println!(
+                        "[{}] (recurring across {} sessions)",
+                        top_category_label(&segment.categories),
+                        segment.session_frequency
+                    );
+                    println!("{}", segment.text);
+                    if idx + 1 < importance_segments.len() {
+                        println!();
+                    }
+                }
+
+                if !entries.is_empty() {
+                    let texts: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
+                    println!("\n{SECTION_SEPARATOR}");
+                    println!("{}", texts.join(&format!("\n{SECTION_SEPARATOR}\n")));
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn category_title_case(category: &ImportanceCategory) -> &'static str {
+    match category {
+        ImportanceCategory::Corrective => "Corrective",
+        ImportanceCategory::Decisive => "Decisive",
+        ImportanceCategory::Stateful => "Stateful",
+        ImportanceCategory::Reinforcing => "Reinforcing",
+        _ => "Uncategorized",
+    }
+}
+
+fn top_category_label(categories: &[ImportanceCategory]) -> &'static str {
+    categories
+        .iter()
+        .map(|category| match category {
+            ImportanceCategory::Corrective => (4, "CORRECTIVE"),
+            ImportanceCategory::Decisive => (3, "DECISIVE"),
+            ImportanceCategory::Stateful => (2, "STATEFUL"),
+            ImportanceCategory::Reinforcing => (1, "REINFORCING"),
+            _ => (0, "UNCATEGORIZED"),
+        })
+        .max_by_key(|(priority, _)| *priority)
+        .map_or("UNCATEGORIZED", |(_, label)| label)
 }
 
 fn cmd_clear(db: &Path) -> Result<(), String> {
@@ -788,6 +939,127 @@ fn cmd_analyze(
     }
 
     Ok(())
+}
+
+fn run_importance_pipeline(
+    entries: &[ContextEntry],
+    scoring_config: &ScoringConfig,
+    importance_budget: usize,
+) -> Vec<ImportanceSegment> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    // Pre-filter execution artifacts
+    let prefilter_config = PrefilterConfig::default();
+    let filtered: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| {
+            let clean = strip_execution_artifacts(&e.content, &prefilter_config);
+            (e.id.clone(), clean)
+        })
+        .filter(|(_, content)| !content.trim().is_empty())
+        .collect();
+
+    // Initialize tokenizer
+    let tokenizer = Tokenizer::new(&TokenizerConfig::default());
+
+    // Group entries by session
+    let session_groups = group_entries_by_session(entries, 180);
+
+    // Build per-session term maps
+    let session_contents: Vec<Vec<&str>> = session_groups
+        .iter()
+        .map(|group| group.entries.iter().map(|e| e.content.as_str()).collect())
+        .collect();
+    let session_term_maps =
+        build_session_term_maps(&session_contents, &tokenizer, &prefilter_config);
+
+    // Compute cross-session recurrence
+    let recurrence_config = RecurrenceConfig::default();
+    let recurrence_results = compute_recurrence(&session_term_maps, &recurrence_config);
+    if recurrence_results.is_empty() {
+        return Vec::new();
+    }
+
+    let recurrence_map: HashMap<String, cf_analysis::RecurrenceResult> = recurrence_results
+        .into_iter()
+        .map(|r| (r.term.clone(), r))
+        .collect();
+    let high_recurrence_terms: Vec<String> = recurrence_map.keys().cloned().collect();
+
+    // Extract passages around recurrence terms
+    let extraction_entries: Vec<ExtractionEntry> = filtered
+        .iter()
+        .map(|(id, content)| ExtractionEntry {
+            entry_id: id.clone(),
+            content: content.clone(),
+        })
+        .collect();
+    let extraction_config = ExtractionConfig::default();
+    let passages = extract_passages(
+        &extraction_entries,
+        &high_recurrence_terms,
+        &extraction_config,
+    );
+    if passages.is_empty() {
+        return Vec::new();
+    }
+
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(err) => {
+            eprintln!("failed to compute current system time for importance pipeline: {err}");
+            return Vec::new();
+        }
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    let now_timestamp = now as i64;
+
+    // Build passage contexts for classification
+    let entry_session_map: HashMap<String, (String, i64)> = session_groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .entries
+                .iter()
+                .map(move |e| (e.id.clone(), (group.session_id.clone(), e.timestamp)))
+        })
+        .collect();
+
+    let passage_contexts: Vec<PassageContext> = passages
+        .iter()
+        .map(|p| {
+            let (session_id, timestamp) = entry_session_map
+                .get(&p.source_entry_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "entry_session_map missing entry: {}",
+                        p.source_entry_id
+                    );
+                    ("unknown".to_string(), now_timestamp)
+                });
+            PassageContext {
+                passage_text: p.text.clone(),
+                triggering_terms: p.triggering_terms.clone(),
+                session_id,
+                timestamp,
+            }
+        })
+        .collect();
+
+    // Classify passages into importance categories
+    let lexicons = Lexicons::default();
+    let classification_config = ClassificationConfig::default();
+    let classified = classify_passages(&passage_contexts, &lexicons, &classification_config);
+
+    // Score classified passages
+    let segments = score_passages(&classified, &recurrence_map, scoring_config, now_timestamp);
+
+    // Pack into token budget
+    pack_segments(&segments, importance_budget)
 }
 
 /// Validate that a transcript path is safe to read.
