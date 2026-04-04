@@ -9,10 +9,10 @@ use std::{fs, process};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use cf_analysis::{
-    build_session_term_maps, classify_passages, compute_recurrence, extract_passages,
-    pack_segments, score_passages, strip_execution_artifacts, ClassificationConfig,
-    ExtractionConfig, ExtractionEntry, Lexicons, PassageContext, PrefilterConfig, RecurrenceConfig,
-    ScoringConfig, Tokenizer, TokenizerConfig,
+    adjust_weights, build_session_term_maps, classify_passages, compute_recurrence,
+    extract_passages, pack_segments, scale_budget, score_passages, strip_execution_artifacts,
+    ClassificationConfig, ExtractionConfig, ExtractionEntry, InjectionConfig, Lexicons,
+    PassageContext, PrefilterConfig, RecurrenceConfig, ScoringConfig, Tokenizer, TokenizerConfig,
 };
 use cf_core::config::DEFAULT_RECENCY_HALF_LIFE_SECS;
 use cf_core::engine::MATCH_ALL_QUERY;
@@ -431,6 +431,9 @@ fn cmd_analyze(
                         "passages_extracted": 0,
                         "segments_scored": 0,
                         "segments_packed": 0,
+                        "compaction_depth": null,
+                        "effective_budget": token_budget,
+                        "budget_scale_factor": 1.0,
                     })
                 } else {
                     serde_json::Value::Null
@@ -442,7 +445,16 @@ fn cmd_analyze(
                         .map_err(|e| format!("json error: {e}"))?
                 );
             }
-            OutputFormat::Text => println!("No entries in database."),
+            OutputFormat::Text => {
+                println!("No entries in database.");
+                if stats {
+                    println!("\n--- Stats ---");
+                    println!("Entries:             0");
+                    println!("Compaction depth:    N/A");
+                    println!("Effective budget:    {token_budget}");
+                    println!("Budget scale factor: 1.00");
+                }
+            }
         }
         return Ok(());
     }
@@ -492,6 +504,9 @@ fn cmd_analyze(
                         "passages_extracted": 0,
                         "segments_scored": 0,
                         "segments_packed": 0,
+                        "compaction_depth": null,
+                        "effective_budget": token_budget,
+                        "budget_scale_factor": 1.0,
                     })
                 } else {
                     serde_json::Value::Null
@@ -514,6 +529,9 @@ fn cmd_analyze(
                     println!("Filtered entries:    {filtered_count}");
                     println!("Sessions:             {session_count}");
                     println!("High-recurrence terms: 0");
+                    println!("Compaction depth:    N/A");
+                    println!("Effective budget:    {token_budget}");
+                    println!("Budget scale factor: 1.00");
                 }
             }
         }
@@ -556,6 +574,9 @@ fn cmd_analyze(
                         "passages_extracted": 0,
                         "segments_scored": 0,
                         "segments_packed": 0,
+                        "compaction_depth": null,
+                        "effective_budget": token_budget,
+                        "budget_scale_factor": 1.0,
                     })
                 } else {
                     serde_json::Value::Null
@@ -579,6 +600,9 @@ fn cmd_analyze(
                     println!("Sessions:             {session_count}");
                     println!("High-recurrence terms: {recurrence_term_count}");
                     println!("Passages extracted:   0");
+                    println!("Compaction depth:    N/A");
+                    println!("Effective budget:    {token_budget}");
+                    println!("Budget scale factor: 1.00");
                 }
             }
         }
@@ -632,13 +656,26 @@ fn cmd_analyze(
     let classification_config = ClassificationConfig::default();
     let classified = classify_passages(&passage_contexts, &lexicons, &classification_config);
 
-    // Step 10: Score
+    // Step 10: Progressive injection — adjust weights and budget
+    let max_compaction_count: Option<i64> = entries.iter().filter_map(|e| e.compaction_count).max();
+
+    let injection_config = InjectionConfig::default();
+    let effective_budget = scale_budget(token_budget, max_compaction_count, &injection_config);
+
     let scoring_config = ScoringConfig::default();
-    let segments = score_passages(&classified, &recurrence_map, &scoring_config, now_timestamp);
+    let adjusted_scoring_config = adjust_weights(&scoring_config, max_compaction_count);
+
+    // Step 11: Score with adjusted weights
+    let segments = score_passages(
+        &classified,
+        &recurrence_map,
+        &adjusted_scoring_config,
+        now_timestamp,
+    );
     let scored_count = segments.len();
 
-    // Step 11: Pack into token budget
-    let packed = pack_segments(&segments, token_budget);
+    // Step 12: Pack into effective budget
+    let packed = pack_segments(&segments, effective_budget);
     let packed_count = packed.len();
 
     // Apply top_k limit
@@ -675,6 +712,13 @@ fn cmd_analyze(
                     "passages_extracted": passage_count,
                     "segments_scored": scored_count,
                     "segments_packed": packed_count,
+                    "compaction_depth": max_compaction_count,
+                    "effective_budget": effective_budget,
+                    "budget_scale_factor": if token_budget == 0 {
+                        1.0
+                    } else {
+                        effective_budget as f64 / token_budget as f64
+                    },
                 })
             } else {
                 serde_json::Value::Null
@@ -725,6 +769,19 @@ fn cmd_analyze(
                 println!("Passages extracted:   {passage_count}");
                 println!("Segments scored:      {scored_count}");
                 println!("Segments packed:      {packed_count}");
+                println!(
+                    "Compaction depth:    {}",
+                    max_compaction_count.map_or("N/A".to_string(), |c| c.to_string())
+                );
+                println!("Effective budget:    {effective_budget}");
+                println!(
+                    "Budget scale factor: {:.2}",
+                    if token_budget == 0 {
+                        1.0
+                    } else {
+                        effective_budget as f64 / token_budget as f64
+                    }
+                );
                 println!("Segments returned:    {}", final_segments.len());
             }
         }
