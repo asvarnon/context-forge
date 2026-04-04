@@ -36,6 +36,7 @@ pub use tokenizer::{Tokenizer, TokenizerConfig};
 ///
 /// Each inner `Vec<&str>` represents the raw content strings for one session.
 /// The resulting maps are suitable as input to [`compute_recurrence`].
+#[allow(clippy::implicit_hasher)]
 #[must_use]
 pub fn build_session_term_maps(
     session_contents: &[Vec<&str>],

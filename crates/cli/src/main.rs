@@ -423,7 +423,19 @@ fn cmd_analyze(
     if entries.is_empty() {
         match format {
             OutputFormat::Json => {
-                let output = serde_json::json!({"segments": [], "stats": null});
+                let stats_value = if stats {
+                    serde_json::json!({
+                        "entry_count": 0,
+                        "session_count": 0,
+                        "high_recurrence_terms": 0,
+                        "passages_extracted": 0,
+                        "segments_scored": 0,
+                        "segments_packed": 0,
+                    })
+                } else {
+                    serde_json::Value::Null
+                };
+                let output = serde_json::json!({"segments": [], "stats": stats_value});
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output)
@@ -446,6 +458,7 @@ fn cmd_analyze(
         })
         .filter(|(_, content)| !content.trim().is_empty())
         .collect();
+    let filtered_count = filtered.len();
 
     // Step 3: Initialize tokenizer (used by Step 5)
     let tokenizer = Tokenizer::new(&TokenizerConfig::default());
@@ -473,6 +486,7 @@ fn cmd_analyze(
                 let stats_value = if stats {
                     serde_json::json!({
                         "entry_count": entry_count,
+                        "filtered_entries": filtered_count,
                         "session_count": session_count,
                         "high_recurrence_terms": 0,
                         "passages_extracted": 0,
@@ -497,6 +511,7 @@ fn cmd_analyze(
                 if stats {
                     println!("\n--- Stats ---");
                     println!("Entries:              {entry_count}");
+                    println!("Filtered entries:    {filtered_count}");
                     println!("Sessions:             {session_count}");
                     println!("High-recurrence terms: 0");
                 }
@@ -535,6 +550,7 @@ fn cmd_analyze(
                 let stats_value = if stats {
                     serde_json::json!({
                         "entry_count": entry_count,
+                        "filtered_entries": filtered_count,
                         "session_count": session_count,
                         "high_recurrence_terms": recurrence_term_count,
                         "passages_extracted": 0,
@@ -555,10 +571,11 @@ fn cmd_analyze(
                 );
             }
             OutputFormat::Text => {
-                println!("No passages extracted from {entry_count} entries.");
+                println!("No passages extracted from {filtered_count} entries.");
                 if stats {
                     println!("\n--- Stats ---");
                     println!("Entries:              {entry_count}");
+                    println!("Filtered entries:    {filtered_count}");
                     println!("Sessions:             {session_count}");
                     println!("High-recurrence terms: {recurrence_term_count}");
                     println!("Passages extracted:   0");
@@ -636,14 +653,14 @@ fn cmd_analyze(
                 .map(|(i, seg)| {
                     serde_json::json!({
                         "rank": i + 1,
-                        "text": seg.text,
+                        "text": &seg.text,
                         "importance_score": seg.importance_score,
                         "recurrence_score": seg.recurrence_score,
                         "category_weight": seg.category_weight,
                         "recency_factor": seg.recency_factor,
                         "categories": seg.categories.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>(),
-                        "triggering_terms": seg.triggering_terms,
-                        "session_id": seg.session_id,
+                        "triggering_terms": &seg.triggering_terms,
+                        "session_id": &seg.session_id,
                         "token_estimate": seg.token_estimate,
                     })
                 })
@@ -652,6 +669,7 @@ fn cmd_analyze(
             let stats_value = if stats {
                 serde_json::json!({
                     "entry_count": entry_count,
+                    "filtered_entries": filtered_count,
                     "session_count": session_count,
                     "high_recurrence_terms": recurrence_term_count,
                     "passages_extracted": passage_count,
@@ -701,6 +719,7 @@ fn cmd_analyze(
             if stats {
                 println!("\n--- Stats ---");
                 println!("Entries:              {entry_count}");
+                println!("Filtered entries:    {filtered_count}");
                 println!("Sessions:             {session_count}");
                 println!("High-recurrence terms: {recurrence_term_count}");
                 println!("Passages extracted:   {passage_count}");
