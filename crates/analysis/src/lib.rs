@@ -13,6 +13,7 @@ pub mod lexicon;
 pub mod ngrams;
 pub mod prefilter;
 pub mod recurrence;
+pub mod scoring;
 pub mod tokenizer;
 
 // Re-export public API
@@ -25,4 +26,5 @@ pub use lexicon::Lexicons;
 pub use ngrams::{bigrams, extract, trigrams};
 pub use prefilter::{strip_execution_artifacts, FilterToggle, PrefilterConfig};
 pub use recurrence::{compute_recurrence, RecurrenceConfig, RecurrenceResult};
+pub use scoring::{pack_segments, score_passages, ImportanceSegment, ScoringConfig};
 pub use tokenizer::{Tokenizer, TokenizerConfig};
