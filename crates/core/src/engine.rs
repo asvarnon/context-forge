@@ -1,10 +1,10 @@
-//! Core business logic: assembly, scoring, eviction, and snapshot management.
+//! Core business logic: assembly, scoring, and snapshot management.
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::config::{CoreConfig, EvictionPolicy, DEFAULT_RECENCY_HALF_LIFE_SECS};
+use crate::config::{CoreConfig, DEFAULT_RECENCY_HALF_LIFE_SECS};
 use crate::entry::{ContextEntry, EntryKind};
 use crate::error::CoreError;
 use crate::traits::{ContextStorage, Result, Searcher};
@@ -47,9 +47,10 @@ pub struct ContextEngine {
     storage: Box<dyn ContextStorage>,
     searcher: Box<dyn Searcher>,
     config: CoreConfig,
-    /// Guards the compound compaction_count → count → evict → save sequence
-    /// within a single process. Multi-process callers (separate CLI invocations)
-    /// are not protected; hook scheduling is relied on for exclusion.
+    /// Guards the compound compaction_count → save sequence within a single
+    /// process. Eviction happens atomically inside the storage layer.
+    /// Multi-process callers (separate CLI invocations) are not protected;
+    /// hook scheduling is relied on for exclusion.
     write_lock: Mutex<()>,
 }
 
@@ -122,7 +123,8 @@ impl ContextEngine {
         Ok(result)
     }
 
-    /// Save a new snapshot entry, evicting if at capacity.
+    /// Save a new snapshot entry. Capacity enforcement (LRU eviction) is
+    /// handled atomically by the storage layer.
     ///
     /// Returns the generated entry ID.
     pub fn save_snapshot(
@@ -141,9 +143,10 @@ impl ContextEngine {
         let id = Uuid::now_v7().to_string();
         let token_count = estimate_tokens(content);
 
-        // Guards the compound compaction_count → count → evict → save sequence
-        // within a single process. Multi-process callers (separate CLI invocations)
-        // are not protected; hook scheduling is relied on for exclusion.
+        // Guards the compound compaction_count → save sequence within a single
+        // process. Eviction happens atomically inside the storage layer.
+        // Multi-process callers (separate CLI invocations) are not protected;
+        // hook scheduling is relied on for exclusion.
         let _guard = self
             .write_lock
             .lock()
@@ -185,11 +188,6 @@ impl ContextEngine {
             agent_id: None,
         };
 
-        // Evict if at capacity.
-        if self.storage.count()? >= self.config.max_entries {
-            self.evict_one()?;
-        }
-
         match &options.raw_json {
             Some(raw_json) => {
                 self.storage.save_with_metadata(
@@ -202,48 +200,6 @@ impl ContextEngine {
         }
 
         Ok(id)
-    }
-
-    /// Evict a single entry according to the configured eviction policy.
-    fn evict_one(&self) -> Result<()> {
-        match self.config.eviction_policy {
-            EvictionPolicy::Lru => self.evict_oldest(),
-            EvictionPolicy::LeastRelevant => self.evict_least_relevant(),
-        }
-    }
-
-    /// Evict the entry with the smallest (oldest) timestamp.
-    fn evict_oldest(&self) -> Result<()> {
-        let all = self.storage.get_all()?;
-        if let Some(oldest) = all.iter().min_by_key(|e| e.timestamp) {
-            if !self.storage.delete(&oldest.id)? {
-                return Err(CoreError::Storage(format!(
-                    "eviction failed: entry '{}' was not deleted",
-                    oldest.id
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Evict the entry with the lowest search relevance.
-    ///
-    /// Uses the searcher to retrieve scored results and removes the lowest.
-    /// Falls back to LRU if search returns nothing (e.g., FTS5 empty query).
-    fn evict_least_relevant(&self) -> Result<()> {
-        let results = self.searcher.search(MATCH_ALL_QUERY, i64::MAX as usize)?;
-        if let Some(lowest) = results.iter().min_by(|a, b| a.score.total_cmp(&b.score)) {
-            if !self.storage.delete(&lowest.entry.id)? {
-                return Err(CoreError::Storage(format!(
-                    "eviction failed: entry '{}' was not deleted",
-                    lowest.entry.id
-                )));
-            }
-        } else {
-            // Fallback to LRU when search returns nothing.
-            self.evict_oldest()?;
-        }
-        Ok(())
     }
 }
 
@@ -258,7 +214,7 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DEFAULT_RECENCY_HALF_LIFE_SECS;
+    use crate::config::{EvictionPolicy, DEFAULT_RECENCY_HALF_LIFE_SECS};
     use crate::entry::ScoredEntry;
     use std::path::PathBuf;
 
@@ -274,12 +230,6 @@ mod tests {
         fn new() -> Self {
             Self {
                 entries: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn with_entries(entries: Vec<ContextEntry>) -> Self {
-            Self {
-                entries: Mutex::new(entries),
             }
         }
     }
@@ -515,93 +465,6 @@ mod tests {
         assert_eq!(all[0].id, id);
         assert_eq!(all[0].content, "hello world");
         assert_eq!(all[0].token_count, Some(estimate_tokens("hello world")));
-    }
-
-    #[test]
-    fn test_eviction_at_boundary() {
-        let mut entries = Vec::new();
-        for i in 0..100 {
-            entries.push(make_entry(
-                &format!("e{i}"),
-                &format!("entry {i}"),
-                1_700_000_000 + i as i64,
-            ));
-        }
-        let storage = MockStorage::with_entries(entries);
-
-        let engine = ContextEngine::new(
-            Box::new(storage),
-            Box::new(MockSearcher::empty()),
-            default_config(100),
-        );
-
-        assert_eq!(engine.storage.count().unwrap(), 100);
-
-        // Saving one more should evict one, keeping count at 100.
-        engine
-            .save_snapshot("entry 100", EntryKind::Auto, &SaveOptions::default())
-            .unwrap();
-        assert_eq!(engine.storage.count().unwrap(), 100);
-    }
-
-    #[test]
-    fn test_lru_eviction_removes_oldest() {
-        let entries = vec![
-            make_entry("oldest", "first entry", 1_700_000_000),
-            make_entry("middle", "second entry", 1_700_000_500),
-            make_entry("newest", "third entry", 1_700_001_000),
-        ];
-        let storage = MockStorage::with_entries(entries);
-
-        let engine = ContextEngine::new(
-            Box::new(storage),
-            Box::new(MockSearcher::empty()),
-            default_config(3), // at capacity
-        );
-
-        engine
-            .save_snapshot("fourth entry", EntryKind::Manual, &SaveOptions::default())
-            .unwrap();
-
-        let all = engine.storage.get_all().unwrap();
-        assert_eq!(all.len(), 3);
-        // "oldest" (timestamp 1_700_000_000) should have been evicted.
-        assert!(!all.iter().any(|e| e.id == "oldest"));
-        assert!(all.iter().any(|e| e.id == "middle"));
-        assert!(all.iter().any(|e| e.id == "newest"));
-    }
-
-    #[test]
-    fn test_least_relevant_eviction() {
-        let entries = vec![
-            make_entry("low", "low relevance", 1_700_000_000),
-            make_entry("high", "high relevance", 1_700_000_001),
-        ];
-
-        // Searcher returns both entries, "low" has lower score.
-        let search_results = vec![
-            make_scored("high", "high relevance", 1_700_000_001, 5.0),
-            make_scored("low", "low relevance", 1_700_000_000, 1.0),
-        ];
-
-        let mut config = default_config(2);
-        config.eviction_policy = EvictionPolicy::LeastRelevant;
-
-        let engine = ContextEngine::new(
-            Box::new(MockStorage::with_entries(entries)),
-            Box::new(MockSearcher::new(search_results)),
-            config,
-        );
-
-        engine
-            .save_snapshot("new entry", EntryKind::Auto, &SaveOptions::default())
-            .unwrap();
-
-        let all = engine.storage.get_all().unwrap();
-        assert_eq!(all.len(), 2);
-        // "low" should have been evicted (lowest score).
-        assert!(!all.iter().any(|e| e.id == "low"));
-        assert!(all.iter().any(|e| e.id == "high"));
     }
 
     #[test]

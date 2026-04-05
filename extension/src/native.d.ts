@@ -17,7 +17,7 @@ declare module '*.node' {
     export interface JsConfig {
         maxEntries?: number;
         tokenBudget?: number;
-        evictionPolicy?: 'lru' | 'least_relevant';
+        evictionPolicy?: 'lru';
     }
 
     export class ContextForgeCore {

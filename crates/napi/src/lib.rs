@@ -61,10 +61,9 @@ fn parse_kind(s: &str) -> napi::Result<EntryKind> {
 fn parse_eviction_policy(s: &str) -> napi::Result<EvictionPolicy> {
     match s {
         "lru" => Ok(EvictionPolicy::Lru),
-        "least_relevant" => Ok(EvictionPolicy::LeastRelevant),
         other => Err(napi::Error::new(
             napi::Status::InvalidArg,
-            format!("unknown eviction_policy: '{other}'. Expected: lru, least_relevant"),
+            format!("unknown eviction_policy: '{other}'. Expected: lru"),
         )),
     }
 }
