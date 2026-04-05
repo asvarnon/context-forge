@@ -2,6 +2,8 @@
 
 Compaction-aware persistent memory engine for AI coding agents.
 
+This project started as personal tinkering — an experiment in how far an AI coding agent can be pushed to manage its own memory and decide what context matters across sessions. It grew well beyond its original scope into a full pipeline covering conversation snapshots, BM25 retrieval, importance detection, and multi-runtime hook support.
+
 ## What Is This?
 
 When AI coding agents compact long conversations, accumulated context — architecture decisions, session learnings, user preferences — gets summarized or silently dropped. The agent loses hard-won knowledge and starts asking questions you already answered.
@@ -13,6 +15,10 @@ When AI coding agents compact long conversations, accumulated context — archit
 3. **SessionStart hook** — When a new session starts, assembles relevant context (BM25 + recency scoring) within a token budget and injects it automatically.
 
 **Primary integration: [Claude Code](https://code.claude.com/)** via its hooks system — no VS Code required. Also ships as a VS Code extension (requires VS Code Insiders for proposed APIs).
+
+Optionally, Context Forge runs an importance detection pipeline that surfaces high-value passages — corrective instructions, design decisions, and recurring patterns — across sessions. These are injected as a dedicated block before BM25 results when `--source` is passed on the `SessionStart` hook.
+
+Hook payloads are auto-detected across runtimes (Claude Code, Codex CLI, Gemini CLI, Cline, OpenClaw), normalizing runtime-specific fields into a unified schema. Pass `--runtime <name>` to override auto-detection.
 
 No network calls. No API keys. Everything stays local.
 
@@ -48,9 +54,9 @@ Context Forge integrates with Claude Code via CLI hooks — `PreCompact`, `PostC
 
 ```
 extension/ ──→ crates/napi/ ──→ crates/core/ ←── crates/cli/
-                                      ▲
-                                      │ (implements traits)
-                                crates/storage/
+                                      ▲                ▲
+                                      │         crates/analysis/
+                               crates/storage/
 ```
 
 **Layer rules:**
@@ -58,6 +64,7 @@ extension/ ──→ crates/napi/ ──→ crates/core/ ←── crates/cli/
 - `crates/napi/` and `crates/cli/` call `crates/core/` only
 - `crates/core/` depends on storage **traits**, never on `rusqlite` directly
 - `crates/storage/` implements traits defined in `core`, owns all SQL
+- `crates/analysis/` runs the importance pipeline; imports from `core/` only
 
 Both `napi` (reader) and `cli` (writer) access the same SQLite file. WAL mode enables concurrent reads alongside a single writer without locking conflicts.
 
@@ -68,6 +75,8 @@ Both `napi` (reader) and `cli` (writer) access the same SQLite file. WAL mode en
 **`crates/storage`** — SQLite persistence layer. Implements `core` traits using rusqlite with bundled-full feature, FTS5 for full-text search, WAL mode for concurrency, and forward-only schema migrations.
 
 **`crates/napi`** — napi-rs FFI bindings. Translates between napi types and core types at the boundary. Called by the VS Code extension to read and inject context. No business logic.
+
+**`crates/analysis`** — Importance detection pipeline. Pre-filtering, tokenization, n-gram extraction, session-frequency scoring, context extraction, classification, and importance scoring. Imports from `core/` only — no I/O, no storage access.
 
 **`crates/cli`** — clap-based CLI binary (`cf`). Invoked by Claude Code hooks or directly from the terminal. Subcommands: `pre-compact`, `save`, `query`, `clear`, `info`. Delegates entirely to `core`.
 
@@ -116,6 +125,7 @@ To launch the extension, open VS Code Insiders with the workspace and press `F5`
 ```
 context-forge/
 ├── crates/
+│   ├── analysis/      # Importance detection pipeline
 │   ├── core/          # Business logic, traits, scoring
 │   ├── storage/       # rusqlite, FTS5, migrations
 │   ├── napi/          # napi-rs bindings for VS Code
@@ -148,6 +158,8 @@ cf info                 Print database diagnostics
 | `--token-budget` | 16000 | Max tokens to assemble. Increase for richer context |
 | `--top-k` | 10 | Max entries to consider |
 | `--format` | json | Output format: `json` or `text` |
+| `--source` | *(none)* | Event source (`startup`, `resume`, `compact`, `clear`). When set, enables importance injection |
+| `--importance-budget` | 512 | Token ceiling for the importance block (prepended before BM25 results) |
 | `--db` | `~/.context-forge/context.db` | Database path |
 
 All subcommands support `--help` for full usage.
@@ -164,13 +176,6 @@ recency_half_life_hours = 72.0
 
 For `token_budget` and `top_k`, CLI flags override config file values, which override compile-time defaults. `recency_half_life_hours` is read only from the config file (or falls back to the compile-time default if not set).
 
-## Related Repos
-
-| Repo | Purpose |
-|------|---------|
-| [context-forge-hub](https://github.com/asvarnon/context-forge-hub) | Documentation hub — architecture decisions, research, agent context |
-| [context-forge-poc](https://github.com/asvarnon/context-forge-poc) | TypeScript proof-of-concept (validated, complete) |
-
 ## Current Status
 
-**v0.1.0** — all phases complete and [released on GitHub](https://github.com/asvarnon/context-forge/releases) with cross-platform binaries. See [open issues](https://github.com/asvarnon/context-forge/issues) for the backlog.
+All phases complete and [released on GitHub](https://github.com/asvarnon/context-forge/releases) with cross-platform binaries. See [open issues](https://github.com/asvarnon/context-forge/issues) for the backlog.
