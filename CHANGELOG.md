@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-04-05
+
+### Features
+
+- Implement context extraction windows ([#48](https://github.com/asvarnon/context-forge/issues/48)) ([ce84bea](https://github.com/asvarnon/context-forge/commit/ce84beaa7f1615199e1c6a7cd1889a17f25dee49))
+- Implement category classification ([#49](https://github.com/asvarnon/context-forge/issues/49)) ([fd8c01d](https://github.com/asvarnon/context-forge/commit/fd8c01de6832e1ea2a849d9c514bcfc6f31e2ae5))
+- Add importance scoring and ImportanceSegment output ([#50](https://github.com/asvarnon/context-forge/issues/50)) ([0c703d2](https://github.com/asvarnon/context-forge/commit/0c703d251c0565a6f80ad58a47012cc219e704f9))
+- Add cf analyze subcommand for batch importance detection ([#51](https://github.com/asvarnon/context-forge/issues/51)) ([f551ebf](https://github.com/asvarnon/context-forge/commit/f551ebfc54eb6b40564c51ddedd6e67377308f4e))
+- Progressive injection policy ([#52](https://github.com/asvarnon/context-forge/issues/52)) ([7eb9047](https://github.com/asvarnon/context-forge/commit/7eb9047d5a5f446badc773635a34e5e94e5456d5))
+- Integrate importance segments into cf query output ([#53](https://github.com/asvarnon/context-forge/issues/53)) ([3cac4b6](https://github.com/asvarnon/context-forge/commit/3cac4b6c366f9eea5a9917f9ed837d3357db0cc2))
+- Runtime adapter write path ([#57](https://github.com/asvarnon/context-forge/issues/57)) ([6d24a73](https://github.com/asvarnon/context-forge/commit/6d24a73133cc8ba9303534b0ad26efabd73b001a))
+
+### Bug Fixes
+
+- Derive Copy on ImportanceCategory to resolve clippy needless_pass_by_value ([cf8902d](https://github.com/asvarnon/context-forge/commit/cf8902d922a46eb45cbefe9d90f6ab3cd80d6140))
+- Address PR review comments on classification module ([2f58f20](https://github.com/asvarnon/context-forge/commit/2f58f20906dffa50bf6ec64419f177c1496ef36c))
+- Switch reinforcing detection from Jaccard to bigram overlap ([f922c5c](https://github.com/asvarnon/context-forge/commit/f922c5cfefd680d885eef07f55912e020332db74))
+- Cap max passage length to prevent cascading window merges ([fdd3907](https://github.com/asvarnon/context-forge/commit/fdd39079095e027a25e5113fb06998c55644e3f1))
+- Address PR #67 review comments ([da32f05](https://github.com/asvarnon/context-forge/commit/da32f055eb9d5183406d801cd79f9551c49c79ce))
+- Resolve clippy cloned_ref_to_slice_refs and document supersession limitation ([#69](https://github.com/asvarnon/context-forge/issues/69)) ([c79fd9a](https://github.com/asvarnon/context-forge/commit/c79fd9a47b6db219eab830572320df4cc83e089f))
+- Address PR #71 review comments ([4dd1412](https://github.com/asvarnon/context-forge/commit/4dd1412f0434c53ba41e706dd1ab0836f998f5dc))
+- Correct proximity threshold from 3600s to validated 180s ([5132da8](https://github.com/asvarnon/context-forge/commit/5132da84d3f4a9520fbb834e6b74dcf301579279))
+- Address PR review comments and clippy CI failure ([82747c4](https://github.com/asvarnon/context-forge/commit/82747c421f2ddf78c76991adbd5b624ce3ed4292))
+- Address PR #74 review comments ([8bb906c](https://github.com/asvarnon/context-forge/commit/8bb906c79342b44d06dba1f4db8060cd6771db9f))
+- Address PR #76 review comments ([d4dceef](https://github.com/asvarnon/context-forge/commit/d4dceef0f90e7a3b8c2de7343cafb5565536bf22))
+- Replace FNV ID generation with UUIDv7 ([#77](https://github.com/asvarnon/context-forge/issues/77)) ([f774891](https://github.com/asvarnon/context-forge/commit/f774891d73ad686ee0bd60a5c57be1fc50a86de8))
+
+### Refactoring
+
+- Consolidate eviction logic into storage layer ([#78](https://github.com/asvarnon/context-forge/issues/78)) ([dbd8637](https://github.com/asvarnon/context-forge/commit/dbd86372ee88c98d086ca29f52503465f2aa0b74))
+
+### Documentation
+
+- Document hook configuration for importance detection ([#55](https://github.com/asvarnon/context-forge/issues/55)) ([2170088](https://github.com/asvarnon/context-forge/commit/21700888e3d0ba93a7ae1fb29690e19a0edd1d7f))
+- Update README for v0.3.x features and architecture ([#79](https://github.com/asvarnon/context-forge/issues/79)) ([d983dd1](https://github.com/asvarnon/context-forge/commit/d983dd1c2f1882bf657742b297a5dc9c85b41c5e))
+
+### Testing
+
+- Add unit tests for NAPI-only logic and move WAL checkpoint ([#80](https://github.com/asvarnon/context-forge/issues/80)) ([ea6ede5](https://github.com/asvarnon/context-forge/commit/ea6ede5e109c04e7781aba8ff5ab0313f7906e04))
+
 ## [0.3.2] - 2026-04-03
 
 ### Features
@@ -23,6 +63,10 @@ All notable changes to this project will be documented in this file.
 ### Refactoring
 
 - Address PR #64 review comments ([79dc054](https://github.com/asvarnon/context-forge/commit/79dc0540e4d59b161d2aa7274c0a1bbddd399a4a))
+
+### Miscellaneous
+
+- Release v0.3.2 ([0a84692](https://github.com/asvarnon/context-forge/commit/0a8469294a56e8bee8e89fb41ef9ed5f09ea2dd7))
 
 ## [0.3.1] - 2026-04-02
 

@@ -97,14 +97,14 @@ dependencies = [
 
 [[package]]
 name = "cf-analysis"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "stop-words",
 ]
 
 [[package]]
 name = "cf-cli"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "cf-analysis",
  "cf-core",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "cf-core"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "cf-napi"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "cf-core",
  "cf-storage",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "cf-storage"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "cf-core",
  "r2d2",
