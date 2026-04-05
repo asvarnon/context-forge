@@ -60,6 +60,13 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_runs_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = SqliteStorage::open(dir.path().join("test.db").as_path(), 100).unwrap();
+        assert!(storage.checkpoint().is_ok());
+    }
+
+    #[test]
     fn test_save_and_count() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         let entry = make_entry("e1", "hello world", 1000, EntryKind::Manual);

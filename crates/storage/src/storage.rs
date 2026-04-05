@@ -96,6 +96,18 @@ impl SqliteStorage {
         .map_err(|e| CoreError::Storage(e.to_string()))
     }
 
+    /// Run a WAL checkpoint (TRUNCATE mode) to flush the WAL file.
+    ///
+    /// Safe to call at any time; no-op if no WAL pages are pending.
+    pub fn checkpoint(&self) -> cf_core::Result<()> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| CoreError::Storage(e.to_string()))
+    }
+
     /// Save an entry and store raw runtime metadata when available.
     pub(crate) fn save_with_metadata(
         &self,
