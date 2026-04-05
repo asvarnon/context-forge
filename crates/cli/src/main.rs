@@ -55,16 +55,42 @@ const MAX_JSON_NESTING: usize = 128;
 const MAX_RUNTIME_LEN: usize = 64;
 
 /// Fast pre-check: reject JSON with implausibly deep nesting.
+///
+/// Tracks string literals and escape sequences to avoid counting
+/// braces/brackets that appear inside JSON string values.
 fn check_json_nesting(input: &str) -> Result<(), String> {
     let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
     for byte in input.bytes() {
-        if byte == b'{' || byte == b'[' {
-            depth += 1;
-            if depth > MAX_JSON_NESTING {
-                return Err("JSON payload exceeds maximum nesting depth".into());
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
             }
-        } else if byte == b'}' || byte == b']' {
-            depth = depth.saturating_sub(1);
+
+            match byte {
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_JSON_NESTING {
+                    return Err("JSON payload exceeds maximum nesting depth".into());
+                }
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -295,17 +321,24 @@ fn cmd_pre_compact(db: &Path, max_entries: usize, runtime: Option<&str>) -> Resu
     }
 
     let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_STDIN_BYTES)
+    let bytes_read = std::io::stdin()
+        .take(MAX_STDIN_BYTES.saturating_add(1))
         .read_to_string(&mut input)
         .map_err(|e| format!("failed to read stdin: {e}"))?;
+    if (bytes_read as u64) > MAX_STDIN_BYTES {
+        return Err(format!(
+            "stdin exceeds maximum size of {MAX_STDIN_BYTES} bytes"
+        ));
+    }
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("stdin was empty; nothing to save".into());
     }
 
-    check_json_nesting(trimmed)?;
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        check_json_nesting(trimmed)?;
+    }
 
     let parsed_json = serde_json::from_str::<serde_json::Value>(trimmed).ok();
     let session_id = parsed_json
@@ -376,17 +409,24 @@ fn cmd_save(
     }
 
     let mut input = String::new();
-    std::io::stdin()
-        .take(MAX_STDIN_BYTES)
+    let bytes_read = std::io::stdin()
+        .take(MAX_STDIN_BYTES.saturating_add(1))
         .read_to_string(&mut input)
         .map_err(|e| format!("failed to read stdin: {e}"))?;
+    if (bytes_read as u64) > MAX_STDIN_BYTES {
+        return Err(format!(
+            "stdin exceeds maximum size of {MAX_STDIN_BYTES} bytes"
+        ));
+    }
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("stdin was empty; nothing to save".into());
     }
 
-    check_json_nesting(trimmed)?;
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        check_json_nesting(trimmed)?;
+    }
 
     let parsed_json = serde_json::from_str::<serde_json::Value>(trimmed).ok();
     let session_id = parsed_json

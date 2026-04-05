@@ -224,7 +224,7 @@ impl SqliteStorage {
                 serde_json::to_string(raw_json).map_err(|e| CoreError::Storage(e.to_string()))?;
 
             tx.execute(
-                "INSERT INTO entry_metadata_raw (entry_id, runtime, raw_json) VALUES (?1, ?2, ?3)",
+                "INSERT OR REPLACE INTO entry_metadata_raw (entry_id, runtime, raw_json) VALUES (?1, ?2, ?3)",
                 rusqlite::params![entry.id, runtime, raw_json_text],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
