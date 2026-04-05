@@ -124,6 +124,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -135,6 +136,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "tempfile",
 ]
 
 [[package]]
@@ -146,6 +148,7 @@ dependencies = [
  "r2d2_sqlite",
  "rusqlite",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

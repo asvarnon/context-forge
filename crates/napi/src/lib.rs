@@ -300,14 +300,7 @@ impl Task for CloseTask {
     type JsValue = ();
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        let conn = self
-            .storage
-            .pool()
-            .get()
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-        Ok(())
+        self.storage.checkpoint().map_err(core_err)
     }
 
     fn resolve(&mut self, _env: Env, _output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -453,5 +446,143 @@ impl ContextForgeCore {
         AsyncTask::new(CloseTask {
             storage: Arc::clone(&self.storage),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_kind_manual() {
+        assert!(matches!(parse_kind("manual"), Ok(EntryKind::Manual)));
+    }
+
+    #[test]
+    fn parse_kind_pre_compact() {
+        assert!(matches!(
+            parse_kind("pre_compact"),
+            Ok(EntryKind::PreCompact)
+        ));
+    }
+
+    #[test]
+    fn parse_kind_auto() {
+        assert!(matches!(parse_kind("auto"), Ok(EntryKind::Auto)));
+    }
+
+    #[test]
+    fn parse_kind_unknown() {
+        assert!(parse_kind("bogus").is_err());
+    }
+
+    #[test]
+    fn parse_kind_case_sensitive() {
+        assert!(parse_kind("Pre_Compact").is_err());
+    }
+
+    #[test]
+    fn parse_kind_rejects_pascal_case() {
+        assert!(parse_kind("Manual").is_err());
+    }
+
+    #[test]
+    fn parse_kind_rejects_uppercase() {
+        assert!(parse_kind("AUTO").is_err());
+    }
+
+    #[test]
+    fn parse_eviction_policy_lru() {
+        assert!(matches!(
+            parse_eviction_policy("lru"),
+            Ok(EvictionPolicy::Lru)
+        ));
+    }
+
+    #[test]
+    fn parse_eviction_policy_unknown() {
+        assert!(parse_eviction_policy("fifo").is_err());
+    }
+
+    #[test]
+    fn parse_eviction_policy_case_sensitive() {
+        assert!(parse_eviction_policy("LRU").is_err());
+    }
+
+    #[test]
+    fn new_accepts_valid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let config = Some(JsConfig {
+            max_entries: Some(500),
+            token_budget: Some(8192),
+            eviction_policy: Some("lru".to_owned()),
+            recency_half_life_hours: Some(48.0),
+        });
+        let core = ContextForgeCore::new(db_path, config);
+        assert!(core.is_ok());
+    }
+
+    #[test]
+    fn new_uses_defaults_when_config_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let core = ContextForgeCore::new(db_path, None);
+        assert!(core.is_ok());
+    }
+
+    #[test]
+    fn new_rejects_negative_half_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let config = Some(JsConfig {
+            max_entries: None,
+            token_budget: None,
+            eviction_policy: None,
+            recency_half_life_hours: Some(-1.0),
+        });
+        let result = ContextForgeCore::new(db_path, config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_rejects_zero_half_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let config = Some(JsConfig {
+            max_entries: None,
+            token_budget: None,
+            eviction_policy: None,
+            recency_half_life_hours: Some(0.0),
+        });
+        assert!(ContextForgeCore::new(db_path, config).is_err());
+    }
+
+    #[test]
+    fn new_rejects_nan_half_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let config = Some(JsConfig {
+            max_entries: None,
+            token_budget: None,
+            eviction_policy: None,
+            recency_half_life_hours: Some(f64::NAN),
+        });
+        let result = ContextForgeCore::new(db_path, config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_rejects_infinite_half_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let config = Some(JsConfig {
+            max_entries: None,
+            token_budget: None,
+            eviction_policy: None,
+            recency_half_life_hours: Some(f64::INFINITY),
+        });
+        let result = ContextForgeCore::new(db_path, config);
+        assert!(result.is_err());
     }
 }
