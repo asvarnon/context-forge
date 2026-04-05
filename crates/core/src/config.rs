@@ -31,6 +31,4 @@ pub struct CoreConfig {
 pub enum EvictionPolicy {
     /// Least-recently-used entries are evicted first.
     Lru,
-    /// Entries with the lowest relevance score are evicted first.
-    LeastRelevant,
 }
