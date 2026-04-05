@@ -1,8 +1,8 @@
 //! Core business logic: assembly, scoring, eviction, and snapshot management.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 use crate::config::{CoreConfig, EvictionPolicy, DEFAULT_RECENCY_HALF_LIFE_SECS};
 use crate::entry::{ContextEntry, EntryKind};
@@ -17,9 +17,6 @@ const DEFAULT_SEARCH_LIMIT: usize = 50;
 /// FTS5 interprets `*` as a prefix wildcard that matches every token.
 /// Searcher implementations MUST treat this value as a match-all query.
 pub const MATCH_ALL_QUERY: &str = "*";
-
-/// Monotonic counter for ID uniqueness within the same second.
-static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Options for saving a snapshot entry.
 #[derive(Debug, Default, Clone)]
@@ -141,7 +138,7 @@ impl ContextEngine {
         let session_id = options.session_id.clone();
 
         let timestamp = current_timestamp();
-        let id = generate_id(content, timestamp);
+        let id = Uuid::now_v7().to_string();
         let token_count = estimate_tokens(content);
 
         // Guards the compound compaction_count → count → evict → save sequence
@@ -248,33 +245,6 @@ impl ContextEngine {
         }
         Ok(())
     }
-}
-
-/// Generate a unique ID from content and timestamp.
-///
-/// Uses FNV-1a (64-bit) for a process-independent hash. A per-process
-/// atomic counter is mixed in to prevent collisions when two entries
-/// have identical content and land within the same second.
-fn generate_id(content: &str, timestamp: i64) -> String {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0100_0000_01b3;
-
-    let seq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let mut hash = FNV_OFFSET;
-    for byte in content.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    for byte in timestamp.to_le_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    for byte in seq.to_le_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("{timestamp}-{hash:x}")
 }
 
 /// Current Unix timestamp in seconds.
@@ -652,22 +622,31 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_id_unique_even_with_same_inputs() {
-        // Monotonic counter ensures uniqueness even with identical content + timestamp.
-        let id1 = generate_id("content", 1_700_000_000);
-        let id2 = generate_id("content", 1_700_000_000);
-        assert_ne!(id1, id2);
+    fn test_save_snapshot_ids_are_unique() {
+        let engine = ContextEngine::new(
+            Box::new(MockStorage::new()),
+            Box::new(MockSearcher::empty()),
+            default_config(100),
+        );
 
-        // Different content → different id.
-        let id3 = generate_id("other", 1_700_000_000);
-        assert_ne!(id1, id3);
-
-        // Different timestamp → different id.
-        let id4 = generate_id("content", 1_700_000_001);
-        assert_ne!(id1, id4);
-
-        // ID should contain the timestamp prefix.
-        assert!(id1.starts_with("1700000000-"));
+        let id1 = engine
+            .save_snapshot(
+                "identical content",
+                EntryKind::PreCompact,
+                &SaveOptions::default(),
+            )
+            .unwrap();
+        let id2 = engine
+            .save_snapshot(
+                "identical content",
+                EntryKind::PreCompact,
+                &SaveOptions::default(),
+            )
+            .unwrap();
+        assert_ne!(
+            id1, id2,
+            "Two saves of identical content must produce distinct IDs"
+        );
     }
 
     #[test]
