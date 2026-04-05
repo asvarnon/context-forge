@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod schema;
 pub mod searcher;
 pub mod storage;
@@ -25,6 +26,7 @@ mod tests {
     use cf_core::entry::{ContextEntry, EntryKind};
     use cf_core::traits::{ContextStorage, Searcher};
     use rusqlite::Connection;
+    use serde_json::json;
 
     use crate::{open_storage, SqliteStorage};
 
@@ -360,6 +362,184 @@ mod tests {
         assert_eq!(got.turn_id, entry.turn_id);
         assert_eq!(got.agent_type, entry.agent_type);
         assert_eq!(got.agent_id, entry.agent_id);
+    }
+
+    #[test]
+    fn test_save_with_metadata_claude_code_sets_fields_and_persists_raw_json() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+
+        let mut entry = make_entry(
+            "meta-claude",
+            "compact summary",
+            1_700_000_111,
+            EntryKind::Auto,
+        );
+        entry.session_id = Some("existing-session".into());
+
+        let raw_json = json!({
+            "source": "compact",
+            "session_id": "mapped-session",
+            "model": "claude-3.7",
+            "cwd": "/tmp/project",
+            "matcher_value": "token_limit",
+            "agent_type": "assistant",
+            "agent_id": "agent-1"
+        });
+
+        storage
+            .save_with_metadata(&mut entry, &raw_json, None)
+            .unwrap();
+
+        let stored = storage.get_all().unwrap();
+        assert_eq!(stored.len(), 1);
+        let got = &stored[0];
+
+        // Existing session_id is preserved and never overwritten by mappings.
+        assert_eq!(got.session_id.as_deref(), Some("existing-session"));
+        assert_eq!(got.runtime.as_deref(), Some("claude-code"));
+        assert_eq!(got.model.as_deref(), Some("claude-3.7"));
+        assert_eq!(got.cwd.as_deref(), Some("/tmp/project"));
+        assert_eq!(got.compaction_trigger.as_deref(), Some("token_limit"));
+        assert_eq!(got.agent_type.as_deref(), Some("assistant"));
+        assert_eq!(got.agent_id.as_deref(), Some("agent-1"));
+
+        let conn = storage.pool().get().unwrap();
+        let (runtime, raw): (String, String) = conn
+            .query_row(
+                "SELECT runtime, raw_json FROM entry_metadata_raw WHERE entry_id = ?1",
+                [&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(runtime, "claude-code");
+        assert_eq!(raw, serde_json::to_string(&raw_json).unwrap());
+    }
+
+    #[test]
+    fn test_save_with_metadata_codex_maps_thread_id_and_git_fields() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+
+        let mut entry = make_entry(
+            "meta-codex",
+            "codex summary",
+            1_700_000_222,
+            EntryKind::Auto,
+        );
+        let raw_json = json!({
+            "threadId": "thread-42",
+            "turnId": "turn-9",
+            "git": {
+                "branch": "feature/runtime-adapter",
+                "sha": "abc123"
+            }
+        });
+
+        storage
+            .save_with_metadata(&mut entry, &raw_json, None)
+            .unwrap();
+
+        let stored = storage.get_all().unwrap();
+        assert_eq!(stored.len(), 1);
+        let got = &stored[0];
+
+        assert_eq!(got.runtime.as_deref(), Some("codex"));
+        assert_eq!(got.session_id.as_deref(), Some("thread-42"));
+        assert_eq!(got.turn_id.as_deref(), Some("turn-9"));
+        assert_eq!(got.git_branch.as_deref(), Some("feature/runtime-adapter"));
+        assert_eq!(got.git_sha.as_deref(), Some("abc123"));
+
+        let conn = storage.pool().get().unwrap();
+        let metadata_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_metadata_raw WHERE entry_id = ?1",
+                [&entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata_count, 1);
+    }
+
+    #[test]
+    fn test_save_with_metadata_cline_runtime() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+        let payload = json!({
+            "sessionId": "sid-cline-1",
+            "model": "claude-3.5-sonnet"
+        });
+
+        let mut entry = make_entry("cline1", "cline conversation", 1000, EntryKind::Auto);
+        storage
+            .save_with_metadata(&mut entry, &payload, None)
+            .unwrap();
+
+        assert_eq!(entry.runtime.as_deref(), Some("cline"));
+    }
+
+    #[test]
+    fn test_save_with_metadata_openclaw_runtime() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+        let payload = json!({
+            "sessionKey": "sk-oc-1",
+            "cwd": "/home/user/project"
+        });
+
+        let mut entry = make_entry("oc1", "openclaw conversation", 1000, EntryKind::Auto);
+        storage
+            .save_with_metadata(&mut entry, &payload, None)
+            .unwrap();
+
+        assert_eq!(entry.runtime.as_deref(), Some("openclaw"));
+    }
+
+    #[test]
+    fn test_save_with_metadata_gemini_runtime() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+        let payload = json!({
+            "session_id": "gem-sess-1",
+            "model": "gemini-2.0-flash"
+        });
+
+        let mut entry = make_entry("gem1", "gemini conversation", 1000, EntryKind::Auto);
+        entry.session_id = None; // ensure adapter fills it
+        storage
+            .save_with_metadata(&mut entry, &payload, None)
+            .unwrap();
+
+        assert_eq!(entry.runtime.as_deref(), Some("gemini"));
+        assert_eq!(entry.session_id.as_deref(), Some("gem-sess-1"));
+    }
+
+    #[test]
+    fn test_save_with_metadata_unknown_runtime_saves_entry_without_metadata_row() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+
+        let mut entry = make_entry(
+            "meta-unknown",
+            "unknown runtime",
+            1_700_000_333,
+            EntryKind::Auto,
+        );
+        let raw_json = json!({
+            "foo": "bar"
+        });
+
+        storage
+            .save_with_metadata(&mut entry, &raw_json, None)
+            .unwrap();
+
+        let stored = storage.get_all().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].runtime, None);
+
+        let conn = storage.pool().get().unwrap();
+        let metadata_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_metadata_raw WHERE entry_id = ?1",
+                [&entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata_count, 0);
     }
 
     #[test]
