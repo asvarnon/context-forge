@@ -26,6 +26,10 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct SaveOptions {
     /// Optional runtime session identifier.
     pub session_id: Option<String>,
+    /// Raw JSON payload from stdin, held as a parsed value for adapter processing.
+    pub raw_json: Option<serde_json::Value>,
+    /// Runtime hint from `--runtime` CLI flag. Overrides auto-detection.
+    pub runtime_hint: Option<String>,
 }
 
 /// Estimate token count using whitespace heuristic (1 token ≈ 4 chars).
@@ -165,7 +169,7 @@ impl ContextEngine {
             None
         };
 
-        let entry = ContextEntry {
+        let mut entry = ContextEntry {
             id: id.clone(),
             content: content.to_owned(),
             timestamp,
@@ -189,7 +193,17 @@ impl ContextEngine {
             self.evict_one()?;
         }
 
-        self.storage.save(&entry)?;
+        match &options.raw_json {
+            Some(raw_json) => {
+                self.storage.save_with_metadata(
+                    &mut entry,
+                    raw_json,
+                    options.runtime_hint.as_deref(),
+                )?;
+            }
+            None => self.storage.save(&entry)?,
+        }
+
         Ok(id)
     }
 
@@ -684,6 +698,7 @@ mod tests {
                 EntryKind::Auto,
                 &SaveOptions {
                     session_id: Some("sess-1".to_owned()),
+                    ..SaveOptions::default()
                 },
             )
             .unwrap();
@@ -693,6 +708,7 @@ mod tests {
                 EntryKind::Auto,
                 &SaveOptions {
                     session_id: Some("sess-1".to_owned()),
+                    ..SaveOptions::default()
                 },
             )
             .unwrap();
@@ -725,6 +741,7 @@ mod tests {
                 EntryKind::PreCompact,
                 &SaveOptions {
                     session_id: Some("sess-2".to_owned()),
+                    ..SaveOptions::default()
                 },
             )
             .unwrap();
@@ -771,6 +788,7 @@ mod tests {
                 EntryKind::PreCompact,
                 &SaveOptions {
                     session_id: Some("sess-mixed".to_owned()),
+                    ..SaveOptions::default()
                 },
             )
             .unwrap();
@@ -781,6 +799,7 @@ mod tests {
                 EntryKind::Auto,
                 &SaveOptions {
                     session_id: Some("sess-mixed".to_owned()),
+                    ..SaveOptions::default()
                 },
             )
             .unwrap();

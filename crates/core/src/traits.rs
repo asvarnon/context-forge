@@ -11,6 +11,18 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 pub trait ContextStorage: Send + Sync {
     /// Persist a single entry.
     fn save(&self, entry: &ContextEntry) -> Result<()>;
+    /// Save an entry with raw metadata.
+    ///
+    /// The default implementation ignores metadata and delegates to
+    /// [`save`](ContextStorage::save).
+    fn save_with_metadata(
+        &self,
+        entry: &mut ContextEntry,
+        _raw_json: &serde_json::Value,
+        _runtime_hint: Option<&str>,
+    ) -> Result<()> {
+        self.save(entry)
+    }
     /// Return the top-k entries (most recent or highest priority).
     fn get_top_k(&self, k: usize) -> Result<Vec<ContextEntry>>;
     /// Return every stored entry.

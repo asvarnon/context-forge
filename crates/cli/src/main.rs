@@ -45,6 +45,31 @@ const SECTION_SEPARATOR: &str = "---";
 /// Maximum allowed length for a session_id from stdin JSON.
 const MAX_SESSION_ID_LEN: usize = 512;
 
+/// Maximum bytes accepted from stdin payloads.
+const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Maximum nesting depth allowed in JSON payloads from stdin.
+const MAX_JSON_NESTING: usize = 128;
+
+/// Maximum allowed length for the --runtime flag value.
+const MAX_RUNTIME_LEN: usize = 64;
+
+/// Fast pre-check: reject JSON with implausibly deep nesting.
+fn check_json_nesting(input: &str) -> Result<(), String> {
+    let mut depth: usize = 0;
+    for byte in input.bytes() {
+        if byte == b'{' || byte == b'[' {
+            depth += 1;
+            if depth > MAX_JSON_NESTING {
+                return Err("JSON payload exceeds maximum nesting depth".into());
+            }
+        } else if byte == b'}' || byte == b']' {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    Ok(())
+}
+
 /// Return the default database path: `~/.context-forge/context.db`.
 fn default_db_path() -> PathBuf {
     let base_dir = dirs::home_dir()
@@ -115,6 +140,9 @@ enum Command {
         /// Maximum number of entries to retain.
         #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
         max_entries: usize,
+        /// Override runtime auto-detection (for example: codex, claude-code, gemini).
+        #[arg(long)]
+        runtime: Option<String>,
     },
     /// Save context from stdin (supports Claude Code PostCompact JSON).
     Save {
@@ -127,6 +155,9 @@ enum Command {
         /// Maximum number of entries to retain.
         #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
         max_entries: usize,
+        /// Override runtime auto-detection (for example: codex, claude-code, gemini).
+        #[arg(long)]
+        runtime: Option<String>,
     },
     /// Query context entries from the store.
     Query {
@@ -214,12 +245,17 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
-        Command::PreCompact { db, max_entries } => cmd_pre_compact(&db, max_entries),
+        Command::PreCompact {
+            db,
+            max_entries,
+            runtime,
+        } => cmd_pre_compact(&db, max_entries, runtime.as_deref()),
         Command::Save {
             db,
             kind,
             max_entries,
-        } => cmd_save(&db, kind.into(), max_entries),
+            runtime,
+        } => cmd_save(&db, kind.into(), max_entries, runtime.as_deref()),
         Command::Query {
             db,
             query,
@@ -249,9 +285,18 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
-fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
+fn cmd_pre_compact(db: &Path, max_entries: usize, runtime: Option<&str>) -> Result<(), String> {
+    if let Some(rt) = runtime {
+        if rt.len() > MAX_RUNTIME_LEN {
+            return Err(format!(
+                "--runtime value exceeds maximum length of {MAX_RUNTIME_LEN} bytes"
+            ));
+        }
+    }
+
     let mut input = String::new();
     std::io::stdin()
+        .take(MAX_STDIN_BYTES)
         .read_to_string(&mut input)
         .map_err(|e| format!("failed to read stdin: {e}"))?;
 
@@ -259,6 +304,8 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("stdin was empty; nothing to save".into());
     }
+
+    check_json_nesting(trimmed)?;
 
     let parsed_json = serde_json::from_str::<serde_json::Value>(trimmed).ok();
     let session_id = parsed_json
@@ -299,7 +346,11 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
         DEFAULT_TOKEN_BUDGET,
         DEFAULT_RECENCY_HALF_LIFE_SECS,
     )?;
-    let options = SaveOptions { session_id };
+    let options = SaveOptions {
+        session_id,
+        raw_json: parsed_json.clone(),
+        runtime_hint: runtime.map(str::to_owned),
+    };
     let id = engine
         .save_snapshot(&content, EntryKind::PreCompact, &options)
         .map_err(|e| e.to_string())?;
@@ -310,9 +361,23 @@ fn cmd_pre_compact(db: &Path, max_entries: usize) -> Result<(), String> {
 
 /// Save context from stdin. If the input is JSON with a `compact_summary` field
 /// (Claude Code PostCompact payload), extract that field. Otherwise save the raw text.
-fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String> {
+fn cmd_save(
+    db: &Path,
+    kind: EntryKind,
+    max_entries: usize,
+    runtime: Option<&str>,
+) -> Result<(), String> {
+    if let Some(rt) = runtime {
+        if rt.len() > MAX_RUNTIME_LEN {
+            return Err(format!(
+                "--runtime value exceeds maximum length of {MAX_RUNTIME_LEN} bytes"
+            ));
+        }
+    }
+
     let mut input = String::new();
     std::io::stdin()
+        .take(MAX_STDIN_BYTES)
         .read_to_string(&mut input)
         .map_err(|e| format!("failed to read stdin: {e}"))?;
 
@@ -320,6 +385,8 @@ fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String
     if trimmed.is_empty() {
         return Err("stdin was empty; nothing to save".into());
     }
+
+    check_json_nesting(trimmed)?;
 
     let parsed_json = serde_json::from_str::<serde_json::Value>(trimmed).ok();
     let session_id = parsed_json
@@ -351,7 +418,11 @@ fn cmd_save(db: &Path, kind: EntryKind, max_entries: usize) -> Result<(), String
         DEFAULT_TOKEN_BUDGET,
         DEFAULT_RECENCY_HALF_LIFE_SECS,
     )?;
-    let options = SaveOptions { session_id };
+    let options = SaveOptions {
+        session_id,
+        raw_json: parsed_json.clone(),
+        runtime_hint: runtime.map(str::to_owned),
+    };
     let id = engine
         .save_snapshot(&content, kind, &options)
         .map_err(|e| e.to_string())?;
