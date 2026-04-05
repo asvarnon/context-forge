@@ -26,12 +26,22 @@
     ],
     "SessionStart": [
       {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cf query --format text --source compact",
+            "timeout": 15000
+          }
+        ]
+      },
+      {
         "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "cf query --format text --top-k 10",
-            "timeout": 10000
+            "command": "cf query --format text --source startup",
+            "timeout": 15000
           }
         ]
       }

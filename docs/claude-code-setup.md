@@ -67,12 +67,22 @@ Add the following to your chosen settings file:
     ],
     "SessionStart": [
       {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cf query --format text --source compact",
+            "timeout": 15000
+          }
+        ]
+      },
+      {
         "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "cf query --format text",
-            "timeout": 10000
+            "command": "cf query --format text --source startup",
+            "timeout": 15000
           }
         ]
       }
@@ -89,7 +99,7 @@ Add the following to your chosen settings file:
 |------|------|-------------|
 | **PreCompact** | Before Claude compacts the conversation | Full transcript is piped via stdin to `cf pre-compact`, saved to SQLite |
 | **PostCompact** | After compaction | JSON with `compact_summary` is piped to `cf save`, summary extracted and saved |
-| **SessionStart** | When a new Claude Code session starts | `cf query` outputs previous context to stdout, which Claude sees as context |
+| **SessionStart** | When a new Claude Code session starts | `cf query` outputs previous context to stdout. With `--source`, an importance block is prepended before BM25 results — passages that recur frequently across sessions, ranked by importance score. Post-compaction sessions (`source=compact`) use progressive injection: the importance budget scales up based on compaction depth to fight context drift. |
 
 The database defaults to `~/.context-forge/context.db`. The directory is created automatically on first use.
 
@@ -158,6 +168,103 @@ cf query --format text --token-budget 32000
 ```
 
 Larger budgets retrieve more context but consume more of Claude's context window. A budget of 16,000–32,000 tokens works well for most workflows.
+
+## Importance Detection
+
+Context Forge analyzes your conversation history to surface high-value passages that recur frequently across sessions. These are injected as a dedicated block before BM25 results at `SessionStart`.
+
+### How It Works
+
+The importance pipeline runs at query time and identifies four categories of passages:
+
+| Category | What it captures |
+|---|---|
+| **Corrective** | Things the model was told NOT to do — prevents repeated mistakes |
+| **Stateful** | Named values and settings that change over time — always injects the latest |
+| **Decisive** | Design decisions with explicit reasoning — preserves architectural choices |
+| **Reinforcing** | Patterns confirmed across multiple sessions — behavioral anchors |
+
+### Hook Setup
+
+Use two `SessionStart` hooks to branch on trigger type:
+
+```json
+"SessionStart": [
+  {
+    "matcher": "compact",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "cf query --format text --source compact",
+        "timeout": 15000
+      }
+    ]
+  },
+  {
+    "matcher": "",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "cf query --format text --source startup",
+        "timeout": 15000
+      }
+    ]
+  }
+]
+```
+
+The `matcher` field matches the `source` value Claude Code sends with `SessionStart`:
+
+| Source | Matcher | Strategy |
+|---|---|---|
+| `startup` | `""` (catch-all) | Broad injection — default weights and budget |
+| `resume` | `""` (catch-all) | Same as startup |
+| `compact` | `"compact"` | Progressive injection — budget scales with compaction depth, weights shift toward reinforcing and stateful categories |
+| `clear` | `""` (catch-all) | Same as startup (importance block will be empty after a clear anyway) |
+
+### Importance Budget
+
+The importance block uses a dedicated token budget separate from the BM25 budget. Use `--importance-budget` to control it:
+
+```bash
+# Default: 512 tokens for importance, remainder for BM25
+cf query --format text --source startup
+
+# Larger importance budget (useful for long-running projects)
+cf query --format text --source startup --importance-budget 1024
+
+# Post-compaction with larger base budget (scales further with compaction depth)
+cf query --format text --source compact --importance-budget 1024
+```
+
+The total token budget (`--token-budget`, default 16,000) is split:
+- Importance block: up to `--importance-budget` tokens (default 512)
+- BM25 results: remaining tokens
+
+For `source=compact`, the effective importance budget scales automatically based on how many times the session has been compacted — 25% more per compaction level (e.g., count=2 → 1.25×, count=3 → 1.5×).
+
+### Output Format
+
+The importance block is prepended to the BM25 output:
+
+```
+=== Important Context ===
+
+[CORRECTIVE] (recurring across 4 sessions)
+You should NOT use unwrap in library crates. Use Result with thiserror instead.
+
+[DECISIVE] (recurring across 3 sessions)
+Chose system OpenSSL over vendored because system OpenSSL gets security patches via dnf update. Set OPENSSL_NO_VENDOR=1 in ~/.bashrc.
+
+---
+<BM25 context entries>
+```
+
+When no importance data exists (empty store or fewer than 2 sessions), only the BM25 block is returned — identical to the pre-importance behavior.
+
+### Backward Compatibility
+
+Existing hook configs that omit `--source` continue to work unchanged — they get BM25-only output, same as before. Add `--source` when you're ready to enable importance injection.
 
 ## Custom Database Path
 
