@@ -22,6 +22,12 @@ Hook payloads are auto-detected across runtimes (Claude Code, Codex CLI, Gemini 
 
 No network calls. No API keys. Everything stays local.
 
+## Security
+
+**Retrieved entries are untrusted text.** Content persisted from past conversations may contain adversarial instructions (stored prompt injection) — including text that originated from another user or from a tool's output. Callers **MUST** present retrieved memory to models as quoted data (e.g. inside a fenced or otherwise clearly delimited context block labeled as history), **never** as system-level instructions, and **MUST NOT** execute or evaluate anything found in it.
+
+To reduce the risk of secrets ending up in that retrieved memory in the first place, `ContextForge::save` scrubs common credential formats (cloud provider keys, API tokens, private key blocks, JWTs, bearer tokens) from entry content before it is written to disk, replacing each match with a `[REDACTED:<label>]` placeholder. This is enabled by default and can be disabled via `Config.scrub.enabled = false` — an explicit, non-silent opt-out. Note that `SaveOptions.metadata` is stored verbatim and is not scrubbed.
+
 ## Install
 
 ### Install Scripts

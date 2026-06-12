@@ -24,6 +24,7 @@ rusqlite = { version = "0.39", features = ["bundled-full"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.33"
 uuid = { version = "1.7", features = ["v7"] }
+regex = "1"
 rayon = { version = "1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"], optional = true }
 

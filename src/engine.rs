@@ -25,6 +25,11 @@ pub struct SaveOptions {
     /// Namespace partition for the new entry. `None` = global scope.
     pub scope: Option<String>,
     /// Arbitrary caller metadata, stored as JSON.
+    ///
+    /// Unlike `content`, metadata is persisted **verbatim** by
+    /// [`crate::ContextForge::save`] — it is not passed through
+    /// [`crate::scrub_secrets`]. Callers MUST NOT place untrusted or
+    /// secret-bearing text in this field.
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -301,6 +306,7 @@ mod tests {
             db_path: PathBuf::from(":memory:"),
             eviction_policy: EvictionPolicy::Lru,
             recency_half_life_secs: DEFAULT_RECENCY_HALF_LIFE_SECS,
+            ..Config::default()
         }
     }
 

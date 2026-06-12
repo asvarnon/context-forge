@@ -40,6 +40,33 @@
 //!     move || cf.query("deploy failure", Some("discord:thread:42"), 2048)
 //! }).await??;
 //! ```
+//!
+//! # Security
+//!
+//! **Retrieved entries are untrusted text.** Content persisted from past
+//! conversations may contain adversarial instructions (stored prompt
+//! injection) — whatever was saved into the store, including text that
+//! originated from another user or from a tool's output, comes back out
+//! verbatim on [`ContextForge::query`] (aside from save-time secret
+//! scrubbing, see below).
+//!
+//! Callers **MUST** present retrieved memory to models as quoted data
+//! (e.g. inside a fenced or otherwise clearly delimited context block
+//! labeled as history), **never** as system-level instructions, and
+//! **MUST NOT** execute or evaluate anything found in it.
+//!
+//! ## Save-time secret scrubbing
+//!
+//! [`ContextForge::save`] applies [`scrub_secrets`] to `content` before it
+//! is persisted, using the [`ScrubConfig`] supplied in [`Config::scrub`].
+//! This redacts common credential formats (cloud provider keys, API
+//! tokens, private key blocks, JWTs, bearer tokens) with
+//! `[REDACTED:<label>]` placeholders so they never reach the database or
+//! the search index. Scrubbing is **on by default** and can be disabled
+//! via `Config { scrub: ScrubConfig { enabled: false }, .. }` — this is an
+//! explicit, non-silent opt-out.
+//!
+//! Note that [`SaveOptions::metadata`] is **not** scrubbed (see its docs).
 
 #![warn(clippy::pedantic)]
 
@@ -47,6 +74,7 @@ pub mod config;
 pub mod engine;
 pub mod entry;
 pub mod error;
+pub mod scrub;
 pub mod session;
 pub mod storage;
 pub mod traits;
@@ -61,6 +89,7 @@ pub use config::{Config, EvictionPolicy};
 pub use engine::{ContextEngine, SaveOptions, MATCH_ALL_QUERY};
 pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::Error;
+pub use scrub::{scrub_secrets, ScrubConfig};
 pub use session::{group_entries_by_session, SessionGroup};
 pub use storage::{open_storage, SqliteSearcher, SqliteStorage};
 pub use traits::{ContextStorage, Result, Searcher};
@@ -74,6 +103,7 @@ pub use traits::{ContextStorage, Result, Searcher};
 /// pass them to [`ContextEngine::new`] instead.
 pub struct ContextForge {
     engine: ContextEngine,
+    scrub_config: ScrubConfig,
 }
 
 impl ContextForge {
@@ -87,9 +117,13 @@ impl ContextForge {
     pub fn open(config: Config) -> Result<Self> {
         let db_path = config.db_path.clone();
         let max_entries = config.max_entries;
+        let scrub_config = config.scrub.clone();
         let (storage, searcher) = open_storage(Path::new(&db_path), max_entries)?;
         let engine = ContextEngine::new(Box::new(storage), Box::new(searcher), config);
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            scrub_config,
+        })
     }
 
     /// Save a new entry. Returns the generated entry ID.
@@ -98,12 +132,19 @@ impl ContextForge {
     /// well-known values). Capacity enforcement (LRU eviction) is handled
     /// atomically by the storage layer.
     ///
+    /// Before persistence, `content` is passed through [`scrub_secrets`]
+    /// using this instance's [`ScrubConfig`] (see [`Config::scrub`]),
+    /// redacting common credential formats with `[REDACTED:<label>]`
+    /// placeholders. `opts.metadata` is stored verbatim and is **not**
+    /// scrubbed — see [`SaveOptions::metadata`].
+    ///
     /// # Errors
     ///
     /// Returns an error if `content` is empty or if the underlying storage
     /// write fails.
     pub fn save(&self, content: &str, kind: &str, opts: &SaveOptions) -> Result<String> {
-        self.engine.save_snapshot(content, kind, opts)
+        let scrubbed = scrub_secrets(content, &self.scrub_config);
+        self.engine.save_snapshot(&scrubbed, kind, opts)
     }
 
     /// Assemble entries matching `query` that fit within `token_budget`.
@@ -205,6 +246,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/cf.db"),
             eviction_policy: EvictionPolicy::Lru,
             recency_half_life_secs: 259_200.0,
+            ..Config::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
