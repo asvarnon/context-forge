@@ -274,12 +274,7 @@ mod tests {
 
     #[test]
     fn discord_token_positive() {
-        let token = format!(
-            "{}.{}.{}",
-            format!("M{}", "A".repeat(23)),
-            "a".repeat(6),
-            "b".repeat(27)
-        );
+        let token = format!("M{}.{}.{}", "A".repeat(23), "a".repeat(6), "b".repeat(27));
         let text = format!("DISCORD_TOKEN={token}");
         let result = scrub_secrets(&text, &cfg());
         assert_eq!(result, "DISCORD_TOKEN=[REDACTED:discord-token]");
@@ -288,12 +283,7 @@ mod tests {
     #[test]
     fn discord_token_near_miss() {
         // Wrong first character (not M/N).
-        let token = format!(
-            "{}.{}.{}",
-            format!("X{}", "A".repeat(23)),
-            "a".repeat(6),
-            "b".repeat(27)
-        );
+        let token = format!("X{}.{}.{}", "A".repeat(23), "a".repeat(6), "b".repeat(27));
         let text = format!("DISCORD_TOKEN={token}");
         let result = scrub_secrets(&text, &cfg());
         assert_eq!(result, text);

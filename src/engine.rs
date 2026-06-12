@@ -574,8 +574,9 @@ mod tests {
                 config,
             );
 
-            assert_eq!(
-                engine.config.recency_half_life_secs, DEFAULT_RECENCY_HALF_LIFE_SECS,
+            assert!(
+                (engine.config.recency_half_life_secs - DEFAULT_RECENCY_HALF_LIFE_SECS).abs()
+                    < f64::EPSILON,
                 "half_life {value} should have been clamped to default",
             );
         }
