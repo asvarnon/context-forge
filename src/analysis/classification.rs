@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use crate::analysis::lexicon::Lexicons;
 
 /// Classification configuration.
@@ -87,43 +90,45 @@ pub fn classify_passages(
         return Vec::new();
     }
 
-    let mut classified: Vec<ClassifiedPassage> = passages
-        .iter()
-        .map(|passage| {
-            let mut categories: Vec<ImportanceCategory> = Vec::new();
+    let classify_one = |passage: &PassageContext| {
+        let mut categories: Vec<ImportanceCategory> = Vec::new();
 
-            if is_corrective(passage, lexicons, config) {
-                categories.push(ImportanceCategory::Corrective);
-            }
+        if is_corrective(passage, lexicons, config) {
+            categories.push(ImportanceCategory::Corrective);
+        }
 
-            let state_match = detect_stateful(passage, lexicons);
-            let (entity, value) = if let Some((state_entity, state_value)) = state_match {
-                categories.push(ImportanceCategory::Stateful);
-                (Some(state_entity), Some(state_value))
-            } else {
-                (None, None)
-            };
+        let state_match = detect_stateful(passage, lexicons);
+        let (entity, value) = if let Some((state_entity, state_value)) = state_match {
+            categories.push(ImportanceCategory::Stateful);
+            (Some(state_entity), Some(state_value))
+        } else {
+            (None, None)
+        };
 
-            let entity_pair = if is_decisive(passage, lexicons) {
-                categories.push(ImportanceCategory::Decisive);
-                extract_entity_pair(passage)
-            } else {
-                None
-            };
+        let entity_pair = if is_decisive(passage, lexicons) {
+            categories.push(ImportanceCategory::Decisive);
+            extract_entity_pair(passage)
+        } else {
+            None
+        };
 
-            ClassifiedPassage {
-                text: passage.passage_text.clone(),
-                categories,
-                triggering_terms: passage.triggering_terms.clone(),
-                session_id: passage.session_id.clone(),
-                timestamp: passage.timestamp,
-                entity,
-                value,
-                entity_pair,
-                superseded: false,
-            }
-        })
-        .collect();
+        ClassifiedPassage {
+            text: passage.passage_text.clone(),
+            categories,
+            triggering_terms: passage.triggering_terms.clone(),
+            session_id: passage.session_id.clone(),
+            timestamp: passage.timestamp,
+            entity,
+            value,
+            entity_pair,
+            superseded: false,
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    let mut classified: Vec<ClassifiedPassage> = passages.par_iter().map(classify_one).collect();
+    #[cfg(not(feature = "parallel"))]
+    let mut classified: Vec<ClassifiedPassage> = passages.iter().map(classify_one).collect();
 
     apply_reinforcing(&mut classified, lexicons, config);
     apply_supersession(&mut classified);

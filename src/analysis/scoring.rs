@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use crate::analysis::classification::{ClassifiedPassage, ImportanceCategory};
 use crate::analysis::recurrence::RecurrenceResult;
 
@@ -97,49 +100,58 @@ pub fn score_passages(
             DEFAULT_IMPORTANCE_HALF_LIFE_SECS
         };
 
+    let score_one = |passage: &ClassifiedPassage| {
+        let recurrence_score = passage
+            .triggering_terms
+            .iter()
+            .filter_map(|term| recurrence_map.get(term))
+            .map(|result| result.recurrence_score)
+            .max_by(f64::total_cmp)
+            .unwrap_or(0.0);
+
+        let session_frequency = passage
+            .triggering_terms
+            .iter()
+            .filter_map(|term| recurrence_map.get(term))
+            .map(|result| result.session_frequency)
+            .max()
+            .unwrap_or(0);
+
+        let category_weight = category_weight(&passage.categories, config);
+
+        let age_seconds = (now_timestamp - passage.timestamp).max(0) as f64;
+        let recency_factor = recency_decay(age_seconds, half_life);
+        let importance_score = recurrence_score * category_weight * recency_factor;
+
+        ImportanceSegment {
+            text: passage.text.clone(),
+            categories: passage.categories.clone(),
+            importance_score,
+            recurrence_score,
+            category_weight,
+            recency_factor,
+            triggering_terms: passage.triggering_terms.clone(),
+            session_frequency,
+            session_id: passage.session_id.clone(),
+            timestamp: passage.timestamp,
+            token_estimate: estimate_tokens(&passage.text),
+        }
+    };
+
+    // NOTE: `superseded` means "superseded in at least one category" - a multi-category
+    // passage may still be the latest representative of another category. Per-category
+    // supersession tracking is a known improvement tracked separately.
+    #[cfg(feature = "parallel")]
+    let mut segments: Vec<ImportanceSegment> = classified
+        .par_iter()
+        .filter(|passage| !passage.superseded)
+        .map(score_one)
+        .collect();
+    #[cfg(not(feature = "parallel"))]
     let mut segments: Vec<ImportanceSegment> = classified
         .iter()
-        // NOTE: `superseded` means "superseded in at least one category" - a multi-category
-        // passage may still be the latest representative of another category. Per-category
-        // supersession tracking is a known improvement tracked separately.
         .filter(|passage| !passage.superseded)
-        .map(|passage| {
-            let recurrence_score = passage
-                .triggering_terms
-                .iter()
-                .filter_map(|term| recurrence_map.get(term))
-                .map(|result| result.recurrence_score)
-                .max_by(f64::total_cmp)
-                .unwrap_or(0.0);
-
-            let session_frequency = passage
-                .triggering_terms
-                .iter()
-                .filter_map(|term| recurrence_map.get(term))
-                .map(|result| result.session_frequency)
-                .max()
-                .unwrap_or(0);
-
-            let category_weight = category_weight(&passage.categories, config);
-
-            let age_seconds = (now_timestamp - passage.timestamp).max(0) as f64;
-            let recency_factor = recency_decay(age_seconds, half_life);
-            let importance_score = recurrence_score * category_weight * recency_factor;
-
-            ImportanceSegment {
-                text: passage.text.clone(),
-                categories: passage.categories.clone(),
-                importance_score,
-                recurrence_score,
-                category_weight,
-                recency_factor,
-                triggering_terms: passage.triggering_terms.clone(),
-                session_frequency,
-                session_id: passage.session_id.clone(),
-                timestamp: passage.timestamp,
-                token_estimate: estimate_tokens(&passage.text),
-            }
-        })
+        .map(score_one)
         .collect();
 
     segments.sort_by(|left, right| {

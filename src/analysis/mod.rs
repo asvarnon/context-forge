@@ -6,6 +6,9 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 pub mod classification;
 pub mod extraction;
 pub mod frequency;
@@ -47,15 +50,53 @@ pub fn build_session_term_maps(
     tokenizer: &Tokenizer,
     prefilter_config: &PrefilterConfig,
 ) -> Vec<HashMap<String, usize>> {
-    session_contents
-        .iter()
-        .map(|contents| {
-            let mut combined_tokens: Vec<String> = Vec::new();
-            for content in contents {
-                let clean = strip_execution_artifacts(content, prefilter_config);
-                combined_tokens.extend(tokenizer.tokenize(&clean));
-            }
-            term_counts_with_ngrams(&combined_tokens)
-        })
-        .collect()
+    let session_term_map = |contents: &Vec<&str>| {
+        let mut combined_tokens: Vec<String> = Vec::new();
+        for content in contents {
+            let clean = strip_execution_artifacts(content, prefilter_config);
+            combined_tokens.extend(tokenizer.tokenize(&clean));
+        }
+        term_counts_with_ngrams(&combined_tokens)
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        session_contents.par_iter().map(session_term_map).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        session_contents.iter().map(session_term_map).collect()
+    }
+}
+
+/// Run `f` inside a scoped rayon thread pool capped at `thread_cap` threads,
+/// or on the global pool when `thread_cap` is `None`.
+///
+/// This crate never configures rayon's *global* thread pool — the global
+/// pool is process-wide and the host application may already own it (for
+/// example, a local LLM server sharing the workstation). Callers that want
+/// to bound CPU usage for a batch analysis pass should wrap that section in
+/// `with_thread_cap(Some(n), || { .. })`. Passing `None` simply calls `f`
+/// directly, running on whatever pool (global or otherwise) is already in
+/// scope.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::InvalidEntry`] if building the scoped thread pool
+/// fails (e.g. `thread_cap` is `Some(0)` or the OS refuses to spawn threads).
+#[cfg(feature = "parallel")]
+pub fn with_thread_cap<R: Send>(
+    thread_cap: Option<usize>,
+    f: impl FnOnce() -> R + Send,
+) -> crate::Result<R> {
+    match thread_cap {
+        Some(threads) => {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .map_err(|err| crate::Error::InvalidEntry(format!("rayon pool: {err}")))?;
+            Ok(pool.install(f))
+        }
+        None => Ok(f()),
+    }
 }

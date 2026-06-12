@@ -82,6 +82,9 @@ pub mod traits;
 #[cfg(feature = "analysis")]
 pub mod analysis;
 
+#[cfg(feature = "parallel")]
+pub use analysis::with_thread_cap;
+
 use std::path::Path;
 
 // Re-export primary types at crate root for convenience.
