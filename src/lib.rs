@@ -71,6 +71,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod config;
+pub mod distill;
 pub mod engine;
 pub mod entry;
 pub mod error;
@@ -89,6 +90,7 @@ use std::path::Path;
 
 // Re-export primary types at crate root for convenience.
 pub use config::{Config, EvictionPolicy};
+pub use distill::{DistilledMemory, Distiller, Fact, FactKind};
 pub use engine::{ContextEngine, SaveOptions, MATCH_ALL_QUERY};
 pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::Error;
@@ -148,6 +150,63 @@ impl ContextForge {
     pub fn save(&self, content: &str, kind: &str, opts: &SaveOptions) -> Result<String> {
         let scrubbed = scrub_secrets(content, &self.scrub_config);
         self.engine.save_snapshot(&scrubbed, kind, opts)
+    }
+
+    /// Distill `transcript` into a summary and durable facts, then save
+    /// them as separate entries sharing `opts.scope` and
+    /// `opts.session_id`.
+    ///
+    /// `transcript` is passed through [`scrub_secrets`] **before** it is
+    /// sent to `distiller` (so secrets never reach a distillation
+    /// endpoint), and the summary/facts produced are scrubbed again before
+    /// persistence via the normal [`ContextForge::save`] path (defense in
+    /// depth).
+    ///
+    /// The summary is saved with `kind::SUMMARY`; each fact is saved with
+    /// `kind::FACT` and metadata `{"fact_kind": "<kind>", "source":
+    /// "distill"}`.
+    ///
+    /// Returns the IDs of the saved entries: the summary's ID first,
+    /// followed by each fact's ID in order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if distillation fails, or if any save fails.
+    pub fn distill_and_save(
+        &self,
+        transcript: &str,
+        distiller: &dyn Distiller,
+        opts: &SaveOptions,
+    ) -> Result<Vec<String>> {
+        let scrubbed_transcript = scrub_secrets(transcript, &self.scrub_config);
+        let memory = distiller.distill(&scrubbed_transcript)?;
+
+        let mut ids = Vec::with_capacity(1 + memory.facts.len());
+
+        let summary_id = self.save(&memory.summary, kind::SUMMARY, opts)?;
+        ids.push(summary_id);
+
+        for fact in &memory.facts {
+            let fact_kind_str = match fact.kind {
+                FactKind::Decision => "decision",
+                FactKind::Correction => "correction",
+                FactKind::Preference => "preference",
+                FactKind::State => "state",
+            };
+            let metadata = serde_json::json!({
+                "fact_kind": fact_kind_str,
+                "source": "distill",
+            });
+            let fact_opts = SaveOptions {
+                session_id: opts.session_id.clone(),
+                scope: opts.scope.clone(),
+                metadata: Some(metadata),
+            };
+            let fact_id = self.save(&fact.text, kind::FACT, &fact_opts)?;
+            ids.push(fact_id);
+        }
+
+        Ok(ids)
     }
 
     /// Assemble entries matching `query` that fit within `token_budget`.
@@ -337,5 +396,94 @@ mod tests {
         let cleared = cf.clear_all().unwrap();
         assert_eq!(cleared, 2);
         assert_eq!(cf.count().unwrap(), 0);
+    }
+
+    /// A stub [`Distiller`] for tests that records the transcript it was
+    /// called with and returns a fixed [`DistilledMemory`].
+    struct StubDistiller {
+        transcript: std::sync::Mutex<Option<String>>,
+    }
+
+    impl StubDistiller {
+        fn new() -> Self {
+            Self {
+                transcript: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl Distiller for StubDistiller {
+        fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
+            *self.transcript.lock().unwrap() = Some(transcript.to_owned());
+            Ok(DistilledMemory {
+                summary: "User decided to roll back the deploy.".to_owned(),
+                facts: vec![
+                    Fact {
+                        kind: FactKind::Decision,
+                        text: "We decided to roll back the deploy.".to_owned(),
+                    },
+                    Fact {
+                        kind: FactKind::Preference,
+                        text: "The user prefers terse commit messages.".to_owned(),
+                    },
+                ],
+            })
+        }
+    }
+
+    #[test]
+    fn distill_and_save_scrubs_saves_and_returns_ids() {
+        let config = Config {
+            db_path: PathBuf::from(":memory:"),
+            ..Config::default()
+        };
+        let cf = ContextForge::open(config).unwrap();
+
+        let distiller = StubDistiller::new();
+        let transcript = "Here is a secret key=AKIAABCDEFGHIJKLMNOP end of transcript";
+
+        let opts = SaveOptions {
+            session_id: Some("sess-1".to_owned()),
+            scope: Some("project:test".to_owned()),
+            metadata: None,
+        };
+
+        let ids = cf.distill_and_save(transcript, &distiller, &opts).unwrap();
+
+        // Summary ID first, then one ID per fact.
+        assert_eq!(ids.len(), 3);
+        for id in &ids {
+            assert!(!id.is_empty());
+        }
+
+        // The transcript reaching the distiller was scrubbed.
+        let seen = distiller.transcript.lock().unwrap().clone().unwrap();
+        assert!(seen.contains("[REDACTED:aws-key]"));
+        assert!(!seen.contains("AKIAABCDEFGHIJKLMNOP"));
+
+        // Summary saved with kind::SUMMARY.
+        let summary = cf
+            .query("rollback OR rollback OR roll", None, 10_000)
+            .unwrap();
+        let summary_entry = summary
+            .iter()
+            .find(|e| e.id == ids[0])
+            .expect("summary entry present");
+        assert_eq!(summary_entry.kind, kind::SUMMARY);
+        assert_eq!(summary_entry.scope.as_deref(), Some("project:test"));
+        assert_eq!(summary_entry.session_id.as_deref(), Some("sess-1"));
+
+        // Facts saved with kind::FACT and the right metadata.
+        let all = cf.query(MATCH_ALL_QUERY, None, 100_000).unwrap();
+        for fact_id in &ids[1..] {
+            let fact_entry = all
+                .iter()
+                .find(|e| &e.id == fact_id)
+                .expect("fact entry present");
+            assert_eq!(fact_entry.kind, kind::FACT);
+            let metadata = fact_entry.metadata.as_ref().expect("metadata present");
+            assert_eq!(metadata["source"], "distill");
+            assert!(metadata["fact_kind"].is_string());
+        }
     }
 }
