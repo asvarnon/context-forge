@@ -147,6 +147,14 @@ impl ContextEngine {
     ///
     /// Returns the generated entry ID.
     ///
+    /// # Security
+    ///
+    /// This is a low-level write path that does **not** scrub secrets from
+    /// `content`. [`ContextForge::save`](crate::ContextForge::save) is the
+    /// only entry point that applies [`scrub_secrets`](crate::scrub_secrets)
+    /// before persistence; callers writing through the engine directly are
+    /// responsible for scrubbing first.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidEntry`] if `content` is empty, or propagates

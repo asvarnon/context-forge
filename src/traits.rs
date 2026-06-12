@@ -11,6 +11,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub trait ContextStorage: Send + Sync {
     /// Persist a single entry.
     ///
+    /// # Security
+    ///
+    /// Implementations persist `entry.content` verbatim — secret scrubbing
+    /// happens only in [`ContextForge::save`](crate::ContextForge::save).
+    /// Callers writing through this trait directly are responsible for
+    /// scrubbing first (see [`scrub_secrets`](crate::scrub_secrets)).
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage write fails.
