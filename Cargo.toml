@@ -1,21 +1,32 @@
-[workspace]
-members = ["crates/*"]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "context-forge"
 version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/asvarnon/context-forge"
 
-[workspace.dependencies]
+[lib]
+name = "context_forge"
+path = "src/lib.rs"
+
+[features]
+default = ["analysis"]
+analysis = ["dep:stop-words"]
+parallel = ["dep:rayon"]
+distill-http = ["dep:reqwest"]
+
+[dependencies]
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-stop-words = "0.10.0"
+stop-words = { version = "0.10.0", optional = true }
 rusqlite = { version = "0.39", features = ["bundled-full"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.33"
-clap = { version = "4", features = ["derive"] }
-napi = { version = "3", features = ["napi9"] }
-napi-derive = "3"
+uuid = { version = "1.7", features = ["v7"] }
+regex = "1"
+rayon = { version = "1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

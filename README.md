@@ -1,181 +1,157 @@
 # Context Forge
 
-Compaction-aware persistent memory engine for AI coding agents.
+A local-first persistent memory library for LLM applications. SQLite + FTS5
+BM25 retrieval, recency-decay scoring, and token-budget-aware context
+assembly — no network calls, no async runtime, no cloud dependency.
 
-This project started as personal tinkering — an experiment in how far an AI coding agent can be pushed to manage its own memory and decide what context matters across sessions. It grew well beyond its original scope into a full pipeline covering conversation snapshots, BM25 retrieval, importance detection, and multi-runtime hook support.
+Embed it in a bot, agent runtime, or MCP server that needs durable,
+searchable memory across sessions.
 
-## What Is This?
+## Quick start
 
-When AI coding agents compact long conversations, accumulated context — architecture decisions, session learnings, user preferences — gets summarized or silently dropped. The agent loses hard-won knowledge and starts asking questions you already answered.
+```rust
+use context_forge::{kind, Config, ContextForge, SaveOptions};
+use std::path::PathBuf;
 
-**Context Forge** hooks into the compaction lifecycle to solve this:
+fn main() -> Result<(), context_forge::Error> {
+    // `Config` is `#[non_exhaustive]` — start from `Default` and mutate.
+    let mut config = Config::default();
+    config.db_path = PathBuf::from("memory.db");
 
-1. **PreCompact hook** — Before compaction, snapshots the full conversation transcript into a local SQLite database (FTS5, WAL mode).
-2. **PostCompact hook** — After compaction, stores the compact summary for future sessions.
-3. **SessionStart hook** — When a new session starts, assembles relevant context (BM25 + recency scoring) within a token budget and injects it automatically.
+    let cf = ContextForge::open(config)?;
 
-**Primary integration: [Claude Code](https://code.claude.com/)** via its hooks system — no VS Code required. Also ships as a VS Code extension (requires VS Code Insiders for proposed APIs).
+    // Save an entry into a named scope (namespace). `None` means global scope.
+    let opts = SaveOptions {
+        scope: Some("project:demo".to_owned()),
+        ..SaveOptions::default()
+    };
+    cf.save(
+        "the deploy failure was caused by a missing env var",
+        kind::SNAPSHOT,
+        &opts,
+    )?;
 
-Optionally, Context Forge runs an importance detection pipeline that surfaces high-value passages — corrective instructions, design decisions, and recurring patterns — across sessions. These are injected as a dedicated block before BM25 results when `--source` is passed on the `SessionStart` hook.
+    // Query within that scope, capped to a token budget.
+    let hits = cf.query("deploy failure", Some("project:demo"), 2048)?;
+    for hit in &hits {
+        println!("{}: {}", hit.id, hit.content);
+    }
 
-Hook payloads are auto-detected across runtimes (Claude Code, Codex CLI, Gemini CLI, Cline, OpenClaw), normalizing runtime-specific fields into a unified schema. Pass `--runtime <name>` to override auto-detection.
-
-No network calls. No API keys. Everything stays local.
-
-## Install
-
-### Install Scripts
-
-```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/asvarnon/context-forge/main/scripts/install.sh | bash
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/asvarnon/context-forge/main/scripts/install.ps1 | iex
+    Ok(())
+}
 ```
 
-### Manual Download
+Run the full version with `cargo run --example basic` (see
+[`examples/basic.rs`](examples/basic.rs)).
 
-Download the `cf` binary for your platform from [GitHub Releases](https://github.com/asvarnon/context-forge/releases):
+The default `db_path` is `:memory:` — an in-memory database that disappears
+when the `ContextForge` instance is dropped. Set a real filesystem path for
+durable storage.
 
-| Platform | Binary |
-|----------|--------|
-| Linux x64 | `cf-linux-x64` |
-| macOS ARM64 | `cf-darwin-arm64` |
-| Windows x64 | `cf-windows-x64.exe` |
+## Feature flags
 
-Place it on your `PATH` and verify with `cf --version`.
+| Feature | Default | Pulls in | Status |
+|---|---|---|---|
+| `analysis` | yes | `stop-words` | Importance-detection pipeline (tokenizer, lexicon, scoring). Used internally for future ranking work. |
+| `parallel` | no | `rayon` | Reserved for Phase 4 (parallel scoring). Not yet implemented. |
+| `distill-http` | no | `reqwest` | Reserved for Phase 5 (local-LLM summarization via an OpenAI-compatible endpoint). Not yet implemented. |
 
-## Claude Code Integration
+## Async callers
 
-Context Forge integrates with Claude Code via CLI hooks — `PreCompact`, `PostCompact`, and `SessionStart`. See [docs/claude-code-setup.md](docs/claude-code-setup.md) for full configuration.
+This crate is synchronous by design — it performs blocking SQLite I/O and
+never spawns its own threads or runtime. Callers using an async runtime
+(e.g. Tokio) should wrap calls in
+[`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
+and share a single `ContextForge` instance behind an `Arc`:
+
+```rust,ignore
+use std::sync::Arc;
+
+let cf = Arc::new(ContextForge::open(config)?);
+
+// in an async context:
+let hits = tokio::task::spawn_blocking({
+    let cf = cf.clone();
+    move || cf.query("deploy failure", Some("discord:thread:42"), 2048)
+}).await??;
+```
+
+## Security
+
+### Save-time secret scrubbing
+
+`ContextForge::save` passes `content` through `scrub_secrets` before it is
+persisted, using the `ScrubConfig` in `Config::scrub`. This redacts common
+credential formats — cloud provider keys, GitHub/Slack/Discord tokens,
+Anthropic/OpenAI keys, PEM private key blocks, JWTs, and bearer tokens — with
+`[REDACTED:<label>]` placeholders before they reach the database or the
+search index.
+
+Scrubbing is **on by default**. Disable it via:
+
+```rust
+use context_forge::{Config, ScrubConfig};
+
+let config = Config {
+    scrub: ScrubConfig { enabled: false, ..ScrubConfig::default() },
+    ..Config::default()
+};
+```
+
+This is an explicit, non-silent opt-out — you are asserting that `content`
+will never contain secrets, or that you have your own scrubbing in place.
+
+Note:
+- `SaveOptions::metadata` is stored **verbatim** and is **not** scrubbed.
+  Do not place untrusted or secret-bearing text there.
+- Scrubbing happens only in `ContextForge::save`. The lower-level
+  `ContextEngine::save_snapshot` and the `ContextStorage` trait persist
+  `content` as-is — callers who write through those paths directly are
+  responsible for scrubbing first.
+
+### Untrusted-memory doctrine
+
+**Retrieved entries are untrusted text.** Anything saved into the store —
+including conversation history, tool output, or text from another user — can
+contain adversarial instructions (stored prompt injection), and comes back
+out verbatim from `ContextForge::query` (aside from save-time secret
+scrubbing above).
+
+Callers **MUST** present retrieved memory to models as quoted data — e.g.
+inside a fenced or otherwise clearly delimited block labeled as history —
+**never** as system-level instructions, and **MUST NOT** execute or evaluate
+anything found in it.
 
 ## Architecture
 
-```
-extension/ ──→ crates/napi/ ──→ crates/core/ ←── crates/cli/
-                                      ▲                ▲
-                                      │         crates/analysis/
-                               crates/storage/
-```
+- `engine` — `ContextEngine::assemble`: BM25 search via the `Searcher` trait,
+  then recency decay (`score * 0.5^(age_seconds / half_life)`, default
+  half-life 259,200s / 72h, configurable via `Config`), then sort by weighted
+  score descending, then greedy bin-pack into the token budget. Oversized
+  entries are skipped, not aborting. Also owns `save_snapshot`. No I/O.
+- `storage` — all SQL: rusqlite + r2d2 connection pool, WAL mode, FTS5
+  virtual table kept in sync via triggers, forward-only migrations
+  (`schema.rs`). Current schema version is v3.
+- `analysis` (feature `analysis`) — importance-detection pipeline
+  (tokenizer, lexicon, n-grams, scoring). Pure computation, no I/O.
+- `scrub` — secret-scrubbing patterns and `scrub_secrets`. Pure, no I/O.
 
-**Layer rules:**
-- `extension/` calls `crates/napi/` only — thin VS Code host, no business logic
-- `crates/napi/` and `crates/cli/` call `crates/core/` only
-- `crates/core/` depends on storage **traits**, never on `rusqlite` directly
-- `crates/storage/` implements traits defined in `core`, owns all SQL
-- `crates/analysis/` runs the importance pipeline; imports from `core/` only
+Entries carry a `scope` field (e.g. `"discord:thread:42"`,
+`"project:homelab-rs"`) for namespace partitioning; `scope = None` is global.
+`ContextForge::query(query, scope, token_budget)` restricts the search to
+`scope` when given, or searches everything when `scope` is `None`.
 
-Both `napi` (reader) and `cli` (writer) access the same SQLite file. WAL mode enables concurrent reads alongside a single writer without locking conflicts.
+## Status
 
-## Crates
+This crate is mid-refactor from a Claude Code compaction-memory plugin into a
+general-purpose library. Phases 0–3 are complete: single-crate layout, data
+model generalization, public API facade, and save-time secret scrubbing.
+Planned:
 
-**`crates/core`** — Pure business logic. Search, context assembly, token budgeting, and relevance scoring. No I/O, no side effects. Defines the `ContextStorage` and `Searcher` traits that downstream crates implement.
+- Phase 4 — `parallel` (rayon-based parallel scoring).
+- Phase 5 — `distill-http` (local-LLM thread distillation via an
+  OpenAI-compatible endpoint).
+- Phase 6 — integration into downstream consumers (homelab-rs).
+- Phase 7 — crates.io publish metadata and release process.
 
-**`crates/storage`** — SQLite persistence layer. Implements `core` traits using rusqlite with bundled-full feature, FTS5 for full-text search, WAL mode for concurrency, and forward-only schema migrations.
-
-**`crates/napi`** — napi-rs FFI bindings. Translates between napi types and core types at the boundary. Called by the VS Code extension to read and inject context. No business logic.
-
-**`crates/analysis`** — Importance detection pipeline. Pre-filtering, tokenization, n-gram extraction, session-frequency scoring, context extraction, classification, and importance scoring. Imports from `core/` only — no I/O, no storage access.
-
-**`crates/cli`** — clap-based CLI binary (`cf`). Invoked by Claude Code hooks or directly from the terminal. Subcommands: `pre-compact`, `save`, `query`, `clear`, `info`. Delegates entirely to `core`.
-
-## Agent System
-
-Custom VS Code agents in `.github/agents/` provide specialized capabilities:
-
-| Agent | Role |
-|-------|------|
-| Claude | Orchestrator — planning, architecture, coordination |
-| Codex | Implementation — code, tests, debugging |
-| Review | Engineering quality — design patterns, scalability |
-| Security | Vulnerability auditing, threat modeling |
-| Documentation | Non-code artifacts — README, guides, design docs |
-| Clean Code | Readability — naming, decomposition, idiomatic patterns. Performance takes precedence over readability in hot paths |
-| Research | Build-vs-buy analysis, library discovery, prior art. Enforces trusted source registry and supply chain security checklist |
-
-## Development Setup
-
-```bash
-git clone https://github.com/asvarnon/context-forge.git
-cd context-forge
-
-# Build all Rust crates
-cargo build --workspace
-
-# Run tests
-cargo test --workspace
-
-# Build the VS Code extension
-cd extension/
-npm install
-npm run build
-cd ..
-```
-
-**Prerequisites:**
-- Rust stable toolchain (rustup)
-- Node.js 20+
-- VS Code Insiders (only needed for extension development — proposed API access)
-
-To launch the extension, open VS Code Insiders with the workspace and press `F5`.
-
-## Project Structure
-
-```
-context-forge/
-├── crates/
-│   ├── analysis/      # Importance detection pipeline
-│   ├── core/          # Business logic, traits, scoring
-│   ├── storage/       # rusqlite, FTS5, migrations
-│   ├── napi/          # napi-rs bindings for VS Code
-│   └── cli/           # clap binary for PreCompact hook
-├── extension/         # TypeScript VS Code extension host
-├── scripts/           # Install scripts (install.sh, install.ps1)
-├── docs/
-│   ├── claude-code-setup.md
-│   ├── design-principles.md
-│   └── ARCHITECTURE.md
-├── Cargo.toml         # Workspace manifest
-└── README.md
-```
-
-## CLI Reference
-
-```
-cf pre-compact          Snapshot conversation transcript (reads stdin)
-cf save [--kind auto]   Store a context entry (reads stdin)
-cf query                Assemble and output context
-cf clear                Delete all entries
-cf info                 Print database diagnostics
-```
-
-**Common flags for `cf query`:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--query` | *(none — returns all)* | FTS5 search query to filter entries (supports AND, OR, NOT, NEAR, quoted phrases) |
-| `--token-budget` | 16000 | Max tokens to assemble. Increase for richer context |
-| `--top-k` | 10 | Max entries to consider |
-| `--format` | json | Output format: `json` or `text` |
-| `--source` | *(none)* | Event source (`startup`, `resume`, `compact`, `clear`). When set, enables importance injection |
-| `--importance-budget` | 512 | Token ceiling for the importance block (prepended before BM25 results) |
-| `--db` | `~/.context-forge/context.db` | Database path |
-
-All subcommands support `--help` for full usage.
-
-## Configuration
-
-Optional config file at `~/.context-forge/config.toml` sets defaults for `cf query`:
-
-```toml
-token_budget = 16000
-top_k = 10
-recency_half_life_hours = 72.0
-```
-
-For `token_budget` and `top_k`, CLI flags override config file values, which override compile-time defaults. `recency_half_life_hours` is read only from the config file (or falls back to the compile-time default if not set).
-
-## Current Status
-
-All phases complete and [released on GitHub](https://github.com/asvarnon/context-forge/releases) with cross-platform binaries. See [open issues](https://github.com/asvarnon/context-forge/issues) for the backlog.
+Not yet published to crates.io.
