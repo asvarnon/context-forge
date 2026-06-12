@@ -80,10 +80,13 @@ pub fn build_session_term_maps(
 /// directly, running on whatever pool (global or otherwise) is already in
 /// scope.
 ///
+/// `Some(0)` is passed through to rayon, which treats zero as "choose the
+/// thread count automatically" — it is not an error.
+///
 /// # Errors
 ///
 /// Returns [`crate::Error::InvalidEntry`] if building the scoped thread pool
-/// fails (e.g. `thread_cap` is `Some(0)` or the OS refuses to spawn threads).
+/// fails (e.g. the OS refuses to spawn threads).
 #[cfg(feature = "parallel")]
 pub fn with_thread_cap<R: Send>(
     thread_cap: Option<usize>,
@@ -98,5 +101,38 @@ pub fn with_thread_cap<R: Send>(
             Ok(pool.install(f))
         }
         None => Ok(f()),
+    }
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod parallel_tests {
+    use super::with_thread_cap;
+
+    #[test]
+    fn with_thread_cap_some_installs_scoped_pool() {
+        let threads = with_thread_cap(Some(2), rayon::current_num_threads).unwrap();
+        assert_eq!(
+            threads, 2,
+            "closure should run inside a 2-thread scoped pool"
+        );
+    }
+
+    #[test]
+    fn with_thread_cap_none_calls_directly() {
+        let value = with_thread_cap(None, || 21 * 2).unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn with_thread_cap_zero_means_automatic() {
+        // rayon treats num_threads(0) as "choose automatically", not an error.
+        let threads = with_thread_cap(Some(0), rayon::current_num_threads).unwrap();
+        assert!(threads >= 1);
+    }
+
+    #[test]
+    fn with_thread_cap_returns_closure_result_through_pool() {
+        let sum: usize = with_thread_cap(Some(2), || (1..=100).sum()).unwrap();
+        assert_eq!(sum, 5050);
     }
 }
