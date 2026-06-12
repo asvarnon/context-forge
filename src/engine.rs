@@ -244,7 +244,7 @@ mod tests {
         fn get_top_k(&self, k: usize) -> Result<Vec<ContextEntry>> {
             let guard = self.entries.lock().unwrap();
             let mut sorted = guard.clone();
-            sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            sorted.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
             sorted.truncate(k);
             Ok(sorted)
         }
