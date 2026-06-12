@@ -33,9 +33,7 @@ impl SqliteSearcher {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, content, timestamp, kind, token_count, \
-                        session_id, compaction_count, compaction_trigger, runtime, model, cwd, \
-                        git_branch, git_sha, turn_id, agent_type, agent_id \
+                "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata \
                  FROM entries \
                  ORDER BY timestamp DESC \
                  LIMIT ?1",
@@ -72,10 +70,8 @@ impl Searcher for SqliteSearcher {
 
         let mut stmt = conn
             .prepare(
-                "SELECT e.id, e.content, e.timestamp, e.kind, e.token_count, \
-                        e.session_id, e.compaction_count, e.compaction_trigger, e.runtime, \
-                        e.model, e.cwd, e.git_branch, e.git_sha, e.turn_id, e.agent_type, \
-                        e.agent_id, bm25(entries_fts) AS score \
+                "SELECT e.id, e.content, e.timestamp, e.kind, e.scope, e.session_id, \
+                        e.token_count, e.metadata, bm25(entries_fts) AS score \
                  FROM entries_fts f \
                  JOIN entries e ON e.rowid = f.rowid \
                  WHERE entries_fts MATCH ?1 \

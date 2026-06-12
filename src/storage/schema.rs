@@ -1,60 +1,35 @@
 use rusqlite::Connection;
 
-use crate::entry::{ContextEntry, EntryKind};
+use crate::entry::ContextEntry;
 use crate::error::CoreError;
 use crate::Result;
 
 const CREATE_SCHEMA_VERSION: &str =
     "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)";
 
-/// Convert an `EntryKind` to its SQLite text representation.
-pub fn kind_to_str(kind: &EntryKind) -> &'static str {
-    match kind {
-        EntryKind::Manual => "Manual",
-        EntryKind::PreCompact => "PreCompact",
-        EntryKind::Auto => "Auto",
-    }
-}
-
-/// Parse a SQLite text value back into an `EntryKind`.
-pub fn str_to_kind(s: &str) -> Result<EntryKind> {
-    match s {
-        "Manual" => Ok(EntryKind::Manual),
-        "PreCompact" => Ok(EntryKind::PreCompact),
-        "Auto" => Ok(EntryKind::Auto),
-        other => Err(CoreError::Storage(format!("unknown EntryKind: {other}"))),
-    }
-}
-
 /// Map a `rusqlite::Row` to a `ContextEntry`.
 ///
 /// The row must contain all columns by name: id, content, timestamp, kind,
-/// token_count, session_id, compaction_count, compaction_trigger, runtime,
-/// model, cwd, git_branch, git_sha, turn_id, agent_type, agent_id.
+/// scope, session_id, token_count, metadata.
 pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextEntry> {
-    let kind_str: String = row.get("kind")?;
     let token_count: Option<i64> = row.get("token_count")?;
-    let kind = str_to_kind(&kind_str).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-    })?;
+    let metadata_str: Option<String> = row.get("metadata")?;
+    let metadata = metadata_str
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?;
 
     Ok(ContextEntry {
         id: row.get("id")?,
         content: row.get("content")?,
         timestamp: row.get("timestamp")?,
-        kind,
-        token_count: token_count.map(|v| v as usize),
+        kind: row.get("kind")?,
+        scope: row.get("scope")?,
         session_id: row.get("session_id")?,
-        compaction_count: row.get("compaction_count")?,
-        compaction_trigger: row.get("compaction_trigger")?,
-        runtime: row.get("runtime")?,
-        model: row.get("model")?,
-        cwd: row.get("cwd")?,
-        git_branch: row.get("git_branch")?,
-        git_sha: row.get("git_sha")?,
-        turn_id: row.get("turn_id")?,
-        agent_type: row.get("agent_type")?,
-        agent_id: row.get("agent_id")?,
+        token_count: token_count.map(|v| v as usize),
+        metadata,
     })
 }
 
@@ -90,7 +65,7 @@ CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
 END;
 "#;
 
-const SCHEMA_V2: &str = r#"
+pub(crate) const SCHEMA_V2: &str = r#"
 BEGIN IMMEDIATE;
 
 ALTER TABLE entries ADD COLUMN session_id TEXT;
@@ -173,6 +148,69 @@ INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 2);
 COMMIT;
 "#;
 
+pub(crate) const SCHEMA_V3: &str = r#"
+BEGIN IMMEDIATE;
+
+CREATE TABLE entries_v3 (
+    id          TEXT PRIMARY KEY,
+    content     TEXT NOT NULL,
+    timestamp   INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    scope       TEXT,
+    session_id  TEXT,
+    token_count INTEGER CHECK(token_count >= 0),
+    metadata    TEXT,
+    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
+) STRICT;
+
+INSERT INTO entries_v3 (id, content, timestamp, kind, scope, session_id, token_count, metadata, created_at)
+SELECT id, content, timestamp,
+       CASE kind WHEN 'Manual' THEN 'manual' WHEN 'PreCompact' THEN 'snapshot' WHEN 'Auto' THEN 'summary' ELSE lower(kind) END,
+       NULL,
+       session_id, token_count,
+       json_patch('{}', json_object(
+           'runtime', runtime, 'model', model, 'cwd', cwd,
+           'git_branch', git_branch, 'git_sha', git_sha,
+           'compaction_trigger', compaction_trigger,
+           'turn_id', turn_id, 'agent_type', agent_type, 'agent_id', agent_id)),
+       created_at
+FROM entries;
+
+DROP TRIGGER IF EXISTS entries_ai;
+DROP TRIGGER IF EXISTS entries_ad;
+DROP TRIGGER IF EXISTS entries_au;
+DROP TABLE entries_fts;
+DROP TABLE entries;
+ALTER TABLE entries_v3 RENAME TO entries;
+
+CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
+CREATE INDEX IF NOT EXISTS idx_entries_scope ON entries(scope);
+CREATE INDEX IF NOT EXISTS idx_entries_session_id ON entries(session_id);
+
+CREATE VIRTUAL TABLE entries_fts USING fts5(content, content=entries, content_rowid=rowid);
+INSERT INTO entries_fts(rowid, content) SELECT rowid, content FROM entries;
+
+CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
+    INSERT INTO entries_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TRIGGER entries_ad AFTER DELETE ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+END;
+
+CREATE TRIGGER entries_au AFTER UPDATE ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+    INSERT INTO entries_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+DROP TABLE IF EXISTS runtime_field_mappings;
+DROP TABLE IF EXISTS runtime_configs;
+DROP TABLE IF EXISTS entry_metadata_raw;
+
+INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 3);
+COMMIT;
+"#;
+
 /// Run database migrations up to the latest schema version.
 ///
 /// This function is idempotent — calling it multiple times on the same
@@ -202,6 +240,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 
     if version < 2 {
         conn.execute_batch(SCHEMA_V2)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+    }
+
+    if version < 3 {
+        conn.execute_batch(SCHEMA_V3)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
     }
 

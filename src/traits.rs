@@ -11,18 +11,6 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 pub trait ContextStorage: Send + Sync {
     /// Persist a single entry.
     fn save(&self, entry: &ContextEntry) -> Result<()>;
-    /// Save an entry with raw metadata.
-    ///
-    /// The default implementation ignores metadata and delegates to
-    /// [`save`](ContextStorage::save).
-    fn save_with_metadata(
-        &self,
-        entry: &mut ContextEntry,
-        _raw_json: &serde_json::Value,
-        _runtime_hint: Option<&str>,
-    ) -> Result<()> {
-        self.save(entry)
-    }
     /// Return the top-k entries (most recent or highest priority).
     fn get_top_k(&self, k: usize) -> Result<Vec<ContextEntry>>;
     /// Return every stored entry.
@@ -33,10 +21,6 @@ pub trait ContextStorage: Send + Sync {
     fn clear(&self) -> Result<usize>;
     /// Return the total number of stored entries.
     fn count(&self) -> Result<usize>;
-    /// Return the maximum compaction count observed for `session_id`.
-    ///
-    /// Returns `None` when the session has no entries with compaction counts.
-    fn max_compaction_count(&self, session_id: &str) -> Result<Option<i64>>;
 }
 
 /// Trait for searching context entries by relevance.

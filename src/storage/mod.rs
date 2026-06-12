@@ -6,7 +6,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::entry::ContextEntry;
 use crate::error::CoreError;
-use crate::storage::schema::{kind_to_str, migrate, row_to_entry};
+use crate::storage::schema::{migrate, row_to_entry};
 use crate::traits::ContextStorage;
 
 pub mod schema;
@@ -144,44 +144,35 @@ impl ContextStorage for SqliteStorage {
             }
         }
 
+        let metadata_json = entry
+            .metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
         tx.execute(
             "INSERT OR REPLACE INTO entries (
                 id,
                 content,
                 timestamp,
                 kind,
-                token_count,
+                scope,
                 session_id,
-                compaction_count,
-                compaction_trigger,
-                runtime,
-                model,
-                cwd,
-                git_branch,
-                git_sha,
-                turn_id,
-                agent_type,
-                agent_id
+                token_count,
+                metadata
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
             )",
             rusqlite::params![
                 entry.id,
                 entry.content,
                 entry.timestamp,
-                kind_to_str(&entry.kind),
-                entry.token_count.map(|v| v as i64),
+                entry.kind,
+                entry.scope,
                 entry.session_id,
-                entry.compaction_count,
-                entry.compaction_trigger,
-                entry.runtime,
-                entry.model,
-                entry.cwd,
-                entry.git_branch,
-                entry.git_sha,
-                entry.turn_id,
-                entry.agent_type,
-                entry.agent_id,
+                entry.token_count.map(|v| v as i64),
+                metadata_json,
             ],
         )
         .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -203,18 +194,10 @@ impl ContextStorage for SqliteStorage {
                     content,
                     timestamp,
                     kind,
-                    token_count,
+                    scope,
                     session_id,
-                    compaction_count,
-                    compaction_trigger,
-                    runtime,
-                    model,
-                    cwd,
-                    git_branch,
-                    git_sha,
-                    turn_id,
-                    agent_type,
-                    agent_id
+                    token_count,
+                    metadata
                  FROM entries
                  ORDER BY timestamp DESC
                  LIMIT ?1",
@@ -242,18 +225,10 @@ impl ContextStorage for SqliteStorage {
                     content,
                     timestamp,
                     kind,
-                    token_count,
+                    scope,
                     session_id,
-                    compaction_count,
-                    compaction_trigger,
-                    runtime,
-                    model,
-                    cwd,
-                    git_branch,
-                    git_sha,
-                    turn_id,
-                    agent_type,
-                    agent_id
+                    token_count,
+                    metadata
                  FROM entries
                  ORDER BY timestamp DESC",
             )
@@ -300,19 +275,6 @@ impl ContextStorage for SqliteStorage {
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(count as usize)
     }
-
-    fn max_compaction_count(&self, session_id: &str) -> crate::Result<Option<i64>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        conn.query_row(
-            "SELECT MAX(compaction_count) FROM entries WHERE session_id = ?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| CoreError::Storage(e.to_string()))
-    }
 }
 
 #[cfg(test)]
@@ -324,7 +286,7 @@ mod tests {
     use rusqlite::Connection;
 
     use crate::engine::MATCH_ALL_QUERY;
-    use crate::entry::{ContextEntry, EntryKind};
+    use crate::entry::{kind, ContextEntry};
     use crate::storage::{open_storage, SqliteStorage};
     use crate::traits::{ContextStorage, Searcher};
 
@@ -336,24 +298,16 @@ mod tests {
         std::env::temp_dir().join(format!("cf-storage-{name}-{nanos}.db"))
     }
 
-    fn make_entry(id: &str, content: &str, timestamp: i64, kind: EntryKind) -> ContextEntry {
+    fn make_entry(id: &str, content: &str, timestamp: i64, kind: &str) -> ContextEntry {
         ContextEntry {
             id: id.into(),
             content: content.into(),
             timestamp,
-            kind,
-            token_count: None,
+            kind: kind.to_owned(),
+            scope: None,
             session_id: None,
-            compaction_count: None,
-            compaction_trigger: None,
-            runtime: None,
-            model: None,
-            cwd: None,
-            git_branch: None,
-            git_sha: None,
-            turn_id: None,
-            agent_type: None,
-            agent_id: None,
+            token_count: None,
+            metadata: None,
         }
     }
 
@@ -367,7 +321,7 @@ mod tests {
     #[test]
     fn test_save_and_count() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        let entry = make_entry("e1", "hello world", 1000, EntryKind::Manual);
+        let entry = make_entry("e1", "hello world", 1000, kind::MANUAL);
         storage.save(&entry).unwrap();
         assert_eq!(storage.count().unwrap(), 1);
     }
@@ -376,13 +330,13 @@ mod tests {
     fn test_save_and_get_top_k() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry("e1", "first", 100, EntryKind::Manual))
+            .save(&make_entry("e1", "first", 100, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e2", "second", 200, EntryKind::PreCompact))
+            .save(&make_entry("e2", "second", 200, kind::SNAPSHOT))
             .unwrap();
         storage
-            .save(&make_entry("e3", "third", 300, EntryKind::Auto))
+            .save(&make_entry("e3", "third", 300, kind::SUMMARY))
             .unwrap();
 
         let top2 = storage.get_top_k(2).unwrap();
@@ -395,13 +349,13 @@ mod tests {
     fn test_save_and_get_all() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry("e1", "first", 100, EntryKind::Manual))
+            .save(&make_entry("e1", "first", 100, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e2", "second", 200, EntryKind::Manual))
+            .save(&make_entry("e2", "second", 200, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e3", "third", 300, EntryKind::Manual))
+            .save(&make_entry("e3", "third", 300, kind::MANUAL))
             .unwrap();
 
         let all = storage.get_all().unwrap();
@@ -416,7 +370,7 @@ mod tests {
     fn test_delete() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry("e1", "hello", 1000, EntryKind::Manual))
+            .save(&make_entry("e1", "hello", 1000, kind::MANUAL))
             .unwrap();
 
         assert!(storage.delete("e1").unwrap());
@@ -428,13 +382,13 @@ mod tests {
     fn test_clear() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry("e1", "a", 100, EntryKind::Manual))
+            .save(&make_entry("e1", "a", 100, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e2", "b", 200, EntryKind::Manual))
+            .save(&make_entry("e2", "b", 200, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e3", "c", 300, EntryKind::Manual))
+            .save(&make_entry("e3", "c", 300, kind::MANUAL))
             .unwrap();
 
         let cleared = storage.clear().unwrap();
@@ -446,13 +400,13 @@ mod tests {
     fn test_lru_eviction() {
         let (storage, _) = open_storage(Path::new(":memory:"), 2).unwrap();
         storage
-            .save(&make_entry("e1", "oldest", 100, EntryKind::Manual))
+            .save(&make_entry("e1", "oldest", 100, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e2", "middle", 200, EntryKind::Manual))
+            .save(&make_entry("e2", "middle", 200, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e3", "newest", 300, EntryKind::Manual))
+            .save(&make_entry("e3", "newest", 300, kind::MANUAL))
             .unwrap();
 
         assert_eq!(storage.count().unwrap(), 2);
@@ -475,24 +429,14 @@ mod tests {
                 "e1",
                 "rust programming language",
                 100,
-                EntryKind::Manual,
+                kind::MANUAL,
             ))
             .unwrap();
         storage
-            .save(&make_entry(
-                "e2",
-                "python scripting",
-                200,
-                EntryKind::Manual,
-            ))
+            .save(&make_entry("e2", "python scripting", 200, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry(
-                "e3",
-                "rust borrow checker",
-                300,
-                EntryKind::Manual,
-            ))
+            .save(&make_entry("e3", "rust borrow checker", 300, kind::MANUAL))
             .unwrap();
 
         let results = searcher.search("rust", 5).unwrap();
@@ -508,7 +452,7 @@ mod tests {
     fn test_fts_search_no_results() {
         let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry("e1", "hello world", 100, EntryKind::Manual))
+            .save(&make_entry("e1", "hello world", 100, kind::MANUAL))
             .unwrap();
 
         let results = searcher.search("nonexistent", 5).unwrap();
@@ -524,8 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_to_v2_migration() {
-        let db_path = temp_db_path("v1-to-v2");
+    fn test_v1_to_v3_migration() {
+        let db_path = temp_db_path("v1-to-v3");
 
         {
             let conn = Connection::open(&db_path).unwrap();
@@ -568,48 +512,18 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
-        let null_runtime_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM entries WHERE runtime IS NULL",
-                [],
-                |r| r.get(0),
-            )
+        // Kinds are remapped to the new lowercase TEXT vocabulary.
+        let mut kinds: Vec<String> = conn
+            .prepare("SELECT kind FROM entries ORDER BY timestamp")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(null_runtime_count, 3);
-
-        let null_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM entries
-                 WHERE session_id IS NULL
-                   AND compaction_count IS NULL
-                   AND compaction_trigger IS NULL
-                   AND model IS NULL
-                   AND cwd IS NULL
-                   AND git_branch IS NULL
-                   AND git_sha IS NULL
-                   AND turn_id IS NULL
-                   AND agent_type IS NULL
-                   AND agent_id IS NULL
-                   AND embedding IS NULL",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(null_count, 3);
-
-        let runtime_configs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM runtime_configs", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(runtime_configs, 5);
-
-        let field_mappings: i64 = conn
-            .query_row("SELECT COUNT(*) FROM runtime_field_mappings", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(field_mappings, 14);
+        kinds.sort();
+        assert_eq!(kinds, vec!["manual", "snapshot", "summary"]);
 
         let tags: i64 = conn
             .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
@@ -621,30 +535,151 @@ mod tests {
             .unwrap();
         assert_eq!(entry_tags, 0, "entry_tags table should exist but be empty");
 
+        // v2-only runtime tables are gone after the v3 rebuild.
+        let runtime_configs_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='runtime_configs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(runtime_configs_exists, 0);
+
         let _ = fs::remove_file(&db_path);
     }
 
     #[test]
-    fn test_new_entry_with_v2_fields() {
+    fn test_v2_to_v3_migration() {
+        let db_path = temp_db_path("v2-to-v3");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+
+            // Build a v2 fixture by running SCHEMA_V1 then SCHEMA_V2 directly,
+            // then inserting rows with runtime columns populated.
+            conn.execute_batch(crate::storage::schema::SCHEMA_V1)
+                .unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(crate::storage::schema::SCHEMA_V2)
+                .unwrap();
+
+            conn.execute(
+                "INSERT INTO entries (
+                    id, content, timestamp, kind, token_count, session_id,
+                    compaction_count, compaction_trigger, runtime, model, cwd,
+                    git_branch, git_sha, turn_id, agent_type, agent_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                rusqlite::params![
+                    "a1",
+                    "auto entry with runtime metadata",
+                    300_i64,
+                    "Auto",
+                    4_i64,
+                    "session-abc",
+                    2_i64,
+                    "matcher:threshold",
+                    "codex",
+                    "gpt-5.3-codex",
+                    "/workspace/context-forge",
+                    "feature/schema-v2",
+                    "abc123def",
+                    "turn-77",
+                    "coder",
+                    "agent-main",
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO entries (id, content, timestamp, kind, token_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["m1", "manual entry", 100_i64, "Manual", 2_i64],
+            )
+            .unwrap();
+        }
+
+        let storage = SqliteStorage::open(&db_path, 100).unwrap();
+
+        // entries preserved
+        let all = storage.get_all().unwrap();
+        assert_eq!(all.len(), 2);
+
+        // kinds remapped: 'Auto' -> 'summary', 'Manual' -> 'manual'
+        let auto_entry = all.iter().find(|e| e.id == "a1").unwrap();
+        let manual_entry = all.iter().find(|e| e.id == "m1").unwrap();
+        assert_eq!(auto_entry.kind, "summary");
+        assert_eq!(manual_entry.kind, "manual");
+
+        // runtime fields present inside metadata JSON
+        let metadata = auto_entry
+            .metadata
+            .as_ref()
+            .expect("metadata should be present for migrated v2 entry");
+        assert_eq!(metadata["runtime"], "codex");
+        assert_eq!(metadata["model"], "gpt-5.3-codex");
+        assert_eq!(metadata["cwd"], "/workspace/context-forge");
+        assert_eq!(metadata["git_branch"], "feature/schema-v2");
+        assert_eq!(metadata["git_sha"], "abc123def");
+        assert_eq!(metadata["compaction_trigger"], "matcher:threshold");
+        assert_eq!(metadata["turn_id"], "turn-77");
+        assert_eq!(metadata["agent_type"], "coder");
+        assert_eq!(metadata["agent_id"], "agent-main");
+
+        // session_id and token_count survive the rebuild
+        assert_eq!(auto_entry.session_id.as_deref(), Some("session-abc"));
+        assert_eq!(auto_entry.token_count, Some(4));
+
+        // FTS query still matches content
+        let (_, searcher) = open_storage(&db_path, 100).unwrap();
+        let results = searcher.search("runtime metadata", 10).unwrap();
+        assert!(
+            results.iter().any(|r| r.entry.id == "a1"),
+            "FTS search should still find the migrated entry's content"
+        );
+
+        // runtime_configs table is gone
+        let conn = storage.pool().get().unwrap();
+        let runtime_configs_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='runtime_configs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(runtime_configs_exists, 0);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 3);
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_new_entry_with_scope_and_metadata() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
 
+        let metadata = serde_json::json!({"runtime": "codex", "model": "gpt-5.3-codex"});
         let entry = ContextEntry {
-            id: "v2-entry".into(),
-            content: "entry with runtime metadata".into(),
+            id: "v3-entry".into(),
+            content: "entry with scope and metadata".into(),
             timestamp: 1_700_000_100,
-            kind: EntryKind::Auto,
-            token_count: Some(6),
+            kind: kind::SUMMARY.to_owned(),
+            scope: Some("project:homelab-rs".into()),
             session_id: Some("session-123".into()),
-            compaction_count: Some(2),
-            compaction_trigger: Some("matcher:threshold".into()),
-            runtime: Some("codex".into()),
-            model: Some("gpt-5.3-codex".into()),
-            cwd: Some("/workspace/context-forge".into()),
-            git_branch: Some("feature/schema-v2".into()),
-            git_sha: Some("abc123def".into()),
-            turn_id: Some("turn-77".into()),
-            agent_type: Some("coder".into()),
-            agent_id: Some("agent-main".into()),
+            token_count: Some(6),
+            metadata: Some(metadata.clone()),
         };
 
         storage.save(&entry).unwrap();
@@ -656,112 +691,20 @@ mod tests {
         assert_eq!(got.content, entry.content);
         assert_eq!(got.timestamp, entry.timestamp);
         assert_eq!(got.kind, entry.kind);
-        assert_eq!(got.token_count, entry.token_count);
+        assert_eq!(got.scope, entry.scope);
         assert_eq!(got.session_id, entry.session_id);
-        assert_eq!(got.compaction_count, entry.compaction_count);
-        assert_eq!(got.compaction_trigger, entry.compaction_trigger);
-        assert_eq!(got.runtime, entry.runtime);
-        assert_eq!(got.model, entry.model);
-        assert_eq!(got.cwd, entry.cwd);
-        assert_eq!(got.git_branch, entry.git_branch);
-        assert_eq!(got.git_sha, entry.git_sha);
-        assert_eq!(got.turn_id, entry.turn_id);
-        assert_eq!(got.agent_type, entry.agent_type);
-        assert_eq!(got.agent_id, entry.agent_id);
-    }
-
-    #[test]
-    fn test_max_compaction_count_none_for_unknown_session() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-
-        storage
-            .save(&make_entry("e1", "hello", 100, EntryKind::Manual))
-            .unwrap();
-
-        let max = storage.max_compaction_count("missing-session").unwrap();
-        assert_eq!(max, None);
-    }
-
-    #[test]
-    fn test_max_compaction_count_returns_session_max() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-
-        let entry1 = ContextEntry {
-            id: "s1-0".into(),
-            content: "first".into(),
-            timestamp: 100,
-            kind: EntryKind::Auto,
-            token_count: Some(1),
-            session_id: Some("sess-1".into()),
-            compaction_count: Some(0),
-            compaction_trigger: None,
-            runtime: None,
-            model: None,
-            cwd: None,
-            git_branch: None,
-            git_sha: None,
-            turn_id: None,
-            agent_type: None,
-            agent_id: None,
-        };
-        let entry2 = ContextEntry {
-            id: "s1-2".into(),
-            content: "second".into(),
-            timestamp: 200,
-            kind: EntryKind::Auto,
-            token_count: Some(1),
-            session_id: Some("sess-1".into()),
-            compaction_count: Some(2),
-            compaction_trigger: None,
-            runtime: None,
-            model: None,
-            cwd: None,
-            git_branch: None,
-            git_sha: None,
-            turn_id: None,
-            agent_type: None,
-            agent_id: None,
-        };
-        let other = ContextEntry {
-            id: "s2-5".into(),
-            content: "other".into(),
-            timestamp: 300,
-            kind: EntryKind::Auto,
-            token_count: Some(1),
-            session_id: Some("sess-2".into()),
-            compaction_count: Some(5),
-            compaction_trigger: None,
-            runtime: None,
-            model: None,
-            cwd: None,
-            git_branch: None,
-            git_sha: None,
-            turn_id: None,
-            agent_type: None,
-            agent_id: None,
-        };
-
-        storage.save(&entry1).unwrap();
-        storage.save(&entry2).unwrap();
-        storage.save(&other).unwrap();
-
-        let max = storage.max_compaction_count("sess-1").unwrap();
-        assert_eq!(max, Some(2));
+        assert_eq!(got.token_count, entry.token_count);
+        assert_eq!(got.metadata, Some(metadata));
     }
 
     #[test]
     fn test_insert_or_replace() {
         let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry(
-                "e1",
-                "original content",
-                100,
-                EntryKind::Manual,
-            ))
+            .save(&make_entry("e1", "original content", 100, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry("e1", "updated content", 200, EntryKind::Auto))
+            .save(&make_entry("e1", "updated content", 200, kind::SUMMARY))
             .unwrap();
 
         assert_eq!(storage.count().unwrap(), 1);
@@ -774,18 +717,13 @@ mod tests {
     fn test_search_match_all_query() {
         let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
         storage
-            .save(&make_entry("e1", "first entry", 100, EntryKind::Manual))
+            .save(&make_entry("e1", "first entry", 100, kind::MANUAL))
             .unwrap();
         storage
-            .save(&make_entry(
-                "e2",
-                "second entry",
-                200,
-                EntryKind::PreCompact,
-            ))
+            .save(&make_entry("e2", "second entry", 200, kind::SNAPSHOT))
             .unwrap();
         storage
-            .save(&make_entry("e3", "third entry", 300, EntryKind::Auto))
+            .save(&make_entry("e3", "third entry", 300, kind::SUMMARY))
             .unwrap();
 
         let results = searcher.search(MATCH_ALL_QUERY, 10).unwrap();

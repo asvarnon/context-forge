@@ -93,26 +93,18 @@ pub fn group_entries_by_session(
 #[cfg(test)]
 mod tests {
     use super::{group_entries_by_session, SessionGroup};
-    use crate::{ContextEntry, EntryKind};
+    use crate::{kind, ContextEntry};
 
     fn make_entry(id: &str, timestamp: i64, session_id: Option<&str>) -> ContextEntry {
         ContextEntry {
             id: id.to_string(),
             content: format!("content-{id}"),
             timestamp,
-            kind: EntryKind::Manual,
-            token_count: None,
+            kind: kind::MANUAL.to_owned(),
+            scope: None,
             session_id: session_id.map(ToString::to_string),
-            compaction_count: None,
-            compaction_trigger: None,
-            runtime: None,
-            model: None,
-            cwd: None,
-            git_branch: None,
-            git_sha: None,
-            turn_id: None,
-            agent_type: None,
-            agent_id: None,
+            token_count: None,
+            metadata: None,
         }
     }
 

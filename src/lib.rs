@@ -17,7 +17,7 @@ pub mod analysis;
 // Re-export primary types at crate root for convenience.
 pub use config::{CoreConfig, EvictionPolicy};
 pub use engine::{ContextEngine, SaveOptions};
-pub use entry::{ContextEntry, EntryKind, ScoredEntry};
+pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::CoreError;
 pub use session::{group_entries_by_session, SessionGroup};
 pub use storage::{open_storage, SqliteSearcher, SqliteStorage};
@@ -34,19 +34,11 @@ mod tests {
             id: "e1".into(),
             content: "hello world".into(),
             timestamp: 1_700_000_000,
-            kind: EntryKind::Manual,
-            token_count: Some(3),
+            kind: kind::MANUAL.to_owned(),
+            scope: None,
             session_id: None,
-            compaction_count: None,
-            compaction_trigger: None,
-            runtime: None,
-            model: None,
-            cwd: None,
-            git_branch: None,
-            git_sha: None,
-            turn_id: None,
-            agent_type: None,
-            agent_id: None,
+            token_count: Some(3),
+            metadata: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: ContextEntry = serde_json::from_str(&json).unwrap();
@@ -98,11 +90,13 @@ mod tests {
     }
 
     #[test]
-    fn entry_kind_equality() {
-        assert_eq!(EntryKind::Manual, EntryKind::Manual);
-        assert_eq!(EntryKind::PreCompact, EntryKind::PreCompact);
-        assert_eq!(EntryKind::Auto, EntryKind::Auto);
-        assert_ne!(EntryKind::Manual, EntryKind::Auto);
+    fn kind_constants_are_distinct() {
+        assert_ne!(kind::MANUAL, kind::SNAPSHOT);
+        assert_ne!(kind::MANUAL, kind::SUMMARY);
+        assert_ne!(kind::MANUAL, kind::FACT);
+        assert_ne!(kind::SNAPSHOT, kind::SUMMARY);
+        assert_ne!(kind::SNAPSHOT, kind::FACT);
+        assert_ne!(kind::SUMMARY, kind::FACT);
     }
 
     #[test]
@@ -112,19 +106,11 @@ mod tests {
                 id: "s1".into(),
                 content: "search hit".into(),
                 timestamp: 1_700_000_001,
-                kind: EntryKind::Auto,
-                token_count: None,
+                kind: kind::SUMMARY.to_owned(),
+                scope: None,
                 session_id: None,
-                compaction_count: None,
-                compaction_trigger: None,
-                runtime: None,
-                model: None,
-                cwd: None,
-                git_branch: None,
-                git_sha: None,
-                turn_id: None,
-                agent_type: None,
-                agent_id: None,
+                token_count: None,
+                metadata: None,
             },
             score: 0.95,
         };
