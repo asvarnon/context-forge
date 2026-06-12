@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// A single context entry stored in the memory engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextEntry {
-    /// Unique identifier (UUIDv7, time-ordered).
+    /// Unique identifier (`UUIDv7`, time-ordered).
     pub id: String,
     /// The text content of the entry.
     pub content: String,

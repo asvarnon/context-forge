@@ -1,26 +1,28 @@
+//! Crate-wide error type.
+
 use thiserror::Error;
 
-/// All errors that can originate from the core engine.
+/// All errors that can originate from this crate.
 #[derive(Debug, Error)]
-pub enum CoreError {
-    /// An error from the storage layer.
+#[non_exhaustive]
+pub enum Error {
+    /// An error from the underlying `SQLite` database.
     #[error("storage error: {0}")]
-    Storage(String),
+    Sqlite(#[from] rusqlite::Error),
 
-    /// The requested token count exceeds the configured budget.
-    #[error("token budget exceeded: requested {requested}, budget {budget}")]
-    TokenBudgetExceeded {
-        /// Tokens requested.
-        requested: usize,
-        /// Configured budget limit.
-        budget: usize,
-    },
+    /// An error obtaining a connection from the connection pool.
+    #[error("connection pool error: {0}")]
+    Pool(#[from] r2d2::Error),
 
     /// An entry failed validation.
     #[error("invalid entry: {0}")]
     InvalidEntry(String),
 
-    /// A configuration value is invalid.
-    #[error("configuration error: {0}")]
-    Config(String),
+    /// A schema migration failed.
+    #[error("migration error: {0}")]
+    Migration(String),
+
+    /// A distillation operation failed.
+    #[error("distillation error: {0}")]
+    Distill(String),
 }

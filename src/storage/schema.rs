@@ -1,7 +1,6 @@
 use rusqlite::Connection;
 
 use crate::entry::ContextEntry;
-use crate::error::CoreError;
 use crate::Result;
 
 const CREATE_SCHEMA_VERSION: &str =
@@ -10,7 +9,7 @@ const CREATE_SCHEMA_VERSION: &str =
 /// Map a `rusqlite::Row` to a `ContextEntry`.
 ///
 /// The row must contain all columns by name: id, content, timestamp, kind,
-/// scope, session_id, token_count, metadata.
+/// `scope`, `session_id`, `token_count`, metadata.
 pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextEntry> {
     let token_count: Option<i64> = row.get("token_count")?;
     let metadata_str: Option<String> = row.get("metadata")?;
@@ -21,6 +20,10 @@ pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextE
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
+    let token_count = token_count.map(usize::try_from).transpose().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Integer, Box::new(e))
+    })?;
+
     Ok(ContextEntry {
         id: row.get("id")?,
         content: row.get("content")?,
@@ -28,12 +31,12 @@ pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextE
         kind: row.get("kind")?,
         scope: row.get("scope")?,
         session_id: row.get("session_id")?,
-        token_count: token_count.map(|v| v as usize),
+        token_count,
         metadata,
     })
 }
 
-pub(crate) const SCHEMA_V1: &str = r#"
+pub(crate) const SCHEMA_V1: &str = r"
 CREATE TABLE IF NOT EXISTS entries (
     id          TEXT PRIMARY KEY,
     content     TEXT NOT NULL,
@@ -63,9 +66,9 @@ CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
     INSERT INTO entries_fts(entries_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
     INSERT INTO entries_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
-"#;
+";
 
-pub(crate) const SCHEMA_V2: &str = r#"
+pub(crate) const SCHEMA_V2: &str = r"
 BEGIN IMMEDIATE;
 
 ALTER TABLE entries ADD COLUMN session_id TEXT;
@@ -146,9 +149,9 @@ INSERT OR IGNORE INTO runtime_field_mappings (runtime, canonical_field, source_p
 
 INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 2);
 COMMIT;
-"#;
+";
 
-pub(crate) const SCHEMA_V3: &str = r#"
+pub(crate) const SCHEMA_V3: &str = r"
 BEGIN IMMEDIATE;
 
 CREATE TABLE entries_v3 (
@@ -209,43 +212,40 @@ DROP TABLE IF EXISTS entry_metadata_raw;
 
 INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 3);
 COMMIT;
-"#;
+";
 
 /// Run database migrations up to the latest schema version.
 ///
 /// This function is idempotent — calling it multiple times on the same
 /// database has no additional effect once the schema is current.
+///
+/// # Errors
+///
+/// Returns an error if any migration statement fails to execute.
 pub fn migrate(conn: &Connection) -> Result<()> {
-    conn.execute_batch(CREATE_SCHEMA_VERSION)
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+    conn.execute_batch(CREATE_SCHEMA_VERSION)?;
 
-    let version: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+    let version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
+    )?;
 
     if version < 1 {
-        conn.execute_batch(SCHEMA_V1)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.execute_batch(SCHEMA_V1)?;
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 1)",
             [],
-        )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+        )?;
     }
 
     if version < 2 {
-        conn.execute_batch(SCHEMA_V2)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.execute_batch(SCHEMA_V2)?;
     }
 
     if version < 3 {
-        conn.execute_batch(SCHEMA_V3)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.execute_batch(SCHEMA_V3)?;
     }
 
     Ok(())

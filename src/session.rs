@@ -12,6 +12,10 @@ pub struct SessionGroup {
 }
 
 /// Groups entries by explicit session id, then by fallback timestamp proximity.
+///
+/// # Panics
+///
+/// Panics if `proximity_threshold_secs` is negative.
 #[must_use]
 pub fn group_entries_by_session(
     entries: &[ContextEntry],

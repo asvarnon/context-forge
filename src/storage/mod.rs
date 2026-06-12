@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::TransactionBehavior;
 
 use crate::entry::ContextEntry;
-use crate::error::CoreError;
 use crate::storage::schema::{migrate, row_to_entry};
 use crate::traits::ContextStorage;
 
@@ -15,6 +15,11 @@ pub mod searcher;
 pub use searcher::SqliteSearcher;
 
 /// Create a paired storage + searcher sharing the same connection pool.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be opened, the connection pool
+/// cannot be built, or migrations fail.
 pub fn open_storage(
     db_path: &Path,
     max_entries: usize,
@@ -46,10 +51,15 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
-    /// Open (or create) a SQLite database at `db_path` and run migrations.
+    /// Open (or create) a `SQLite` database at `db_path` and run migrations.
     ///
     /// For `":memory:"`, a single-connection pool is used so that all operations
     /// share the same in-memory database instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened, the connection
+    /// pool cannot be built, or migrations fail.
     pub fn open(db_path: &Path, max_entries: usize) -> crate::Result<Self> {
         let manager = SqliteConnectionManager::file(db_path);
         let mut builder = Pool::builder().connection_customizer(Box::new(PragmaCustomizer));
@@ -62,11 +72,9 @@ impl SqliteStorage {
             builder = builder.max_size(4);
         }
 
-        let pool = builder
-            .build(manager)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let pool = builder.build(manager)?;
 
-        let conn = pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = pool.get()?;
         migrate(&conn)?;
 
         Ok(Self {
@@ -77,70 +85,65 @@ impl SqliteStorage {
 
     /// Return a reference-counted handle to the connection pool so that
     /// [`SqliteSearcher`](crate::storage::SqliteSearcher) can share it.
+    #[must_use]
     pub fn pool(&self) -> Arc<Pool<SqliteConnectionManager>> {
         Arc::clone(&self.pool)
     }
 
     /// Return the current schema version from the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection pool or query fails.
     pub fn schema_version(&self) -> crate::Result<i64> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        conn.query_row(
+        let conn = self.pool.get()?;
+        let version = conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],
             |row| row.get(0),
-        )
-        .map_err(|e| CoreError::Storage(e.to_string()))
+        )?;
+        Ok(version)
     }
 
     /// Run a WAL checkpoint (TRUNCATE mode) to flush the WAL file.
     ///
     /// Safe to call at any time; no-op if no WAL pages are pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection pool or checkpoint pragma fails.
     pub fn checkpoint(&self) -> crate::Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .map_err(|e| CoreError::Storage(e.to_string()))
+        let conn = self.pool.get()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
     }
 }
 
 impl ContextStorage for SqliteStorage {
     fn save(&self, entry: &ContextEntry) -> crate::Result<()> {
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let mut conn = self.pool.get()?;
 
-        let tx = conn
-            .transaction()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         // LRU eviction: only evict when inserting a new entry (not replacing
         // an existing ID) and currently at capacity.
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
-                [&entry.id],
-                |r| r.get(0),
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+            [&entry.id],
+            |r| r.get(0),
+        )?;
 
         if !exists {
-            let current_count: i64 = tx
-                .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            let current_count: i64 =
+                tx.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
 
-            if current_count as usize >= self.max_entries {
+            let current_count = usize::try_from(current_count).unwrap_or(usize::MAX);
+            if current_count >= self.max_entries {
                 tx.execute(
                     "DELETE FROM entries WHERE id = (\
                      SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
                     [],
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                )?;
             }
         }
 
@@ -149,7 +152,7 @@ impl ContextStorage for SqliteStorage {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(|e| crate::Error::InvalidEntry(format!("metadata is not valid JSON: {e}")))?;
 
         tx.execute(
             "INSERT OR REPLACE INTO entries (
@@ -171,109 +174,87 @@ impl ContextStorage for SqliteStorage {
                 entry.kind,
                 entry.scope,
                 entry.session_id,
-                entry.token_count.map(|v| v as i64),
+                entry
+                    .token_count
+                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
                 metadata_json,
             ],
-        )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+        )?;
 
-        tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
+        tx.commit()?;
 
         Ok(())
     }
 
     fn get_top_k(&self, k: usize) -> crate::Result<Vec<ContextEntry>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT
-                    id,
-                    content,
-                    timestamp,
-                    kind,
-                    scope,
-                    session_id,
-                    token_count,
-                    metadata
-                 FROM entries
-                 ORDER BY timestamp DESC
-                 LIMIT ?1",
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT
+                id,
+                content,
+                timestamp,
+                kind,
+                scope,
+                session_id,
+                token_count,
+                metadata
+             FROM entries
+             ORDER BY timestamp DESC
+             LIMIT ?1",
+        )?;
 
         let entries = stmt
-            .query_map([k as i64], row_to_entry)
-            .map_err(|e| CoreError::Storage(e.to_string()))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .query_map([i64::try_from(k).unwrap_or(i64::MAX)], row_to_entry)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(entries)
     }
 
     fn get_all(&self) -> crate::Result<Vec<ContextEntry>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT
-                    id,
-                    content,
-                    timestamp,
-                    kind,
-                    scope,
-                    session_id,
-                    token_count,
-                    metadata
-                 FROM entries
-                 ORDER BY timestamp DESC",
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT
+                id,
+                content,
+                timestamp,
+                kind,
+                scope,
+                session_id,
+                token_count,
+                metadata
+             FROM entries
+             ORDER BY timestamp DESC",
+        )?;
 
         let entries = stmt
-            .query_map([], row_to_entry)
-            .map_err(|e| CoreError::Storage(e.to_string()))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .query_map([], row_to_entry)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(entries)
     }
 
     fn delete(&self, id: &str) -> crate::Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let changes = conn
-            .execute("DELETE FROM entries WHERE id = ?1", [id])
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self.pool.get()?;
+        let changes = conn.execute("DELETE FROM entries WHERE id = ?1", [id])?;
         Ok(changes > 0)
     }
 
     fn clear(&self) -> crate::Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let changes = conn
-            .execute("DELETE FROM entries", [])
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = self.pool.get()?;
+        let changes = conn.execute("DELETE FROM entries", [])?;
+        Ok(changes)
+    }
+
+    fn clear_scope(&self, scope: &str) -> crate::Result<usize> {
+        let conn = self.pool.get()?;
+        let changes = conn.execute("DELETE FROM entries WHERE scope = ?1", [scope])?;
         Ok(changes)
     }
 
     fn count(&self) -> crate::Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        Ok(count as usize)
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 }
 
@@ -305,6 +286,19 @@ mod tests {
             timestamp,
             kind: kind.to_owned(),
             scope: None,
+            session_id: None,
+            token_count: None,
+            metadata: None,
+        }
+    }
+
+    fn make_scoped_entry(id: &str, content: &str, timestamp: i64, scope: &str) -> ContextEntry {
+        ContextEntry {
+            id: id.into(),
+            content: content.into(),
+            timestamp,
+            kind: kind::MANUAL.to_owned(),
+            scope: Some(scope.to_owned()),
             session_id: None,
             token_count: None,
             metadata: None,
@@ -397,6 +391,39 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_scope() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+        storage
+            .save(&make_scoped_entry("e1", "a", 100, "scope-a"))
+            .unwrap();
+        storage
+            .save(&make_scoped_entry("e2", "b", 200, "scope-a"))
+            .unwrap();
+        storage
+            .save(&make_scoped_entry("e3", "c", 300, "scope-b"))
+            .unwrap();
+
+        let cleared = storage.clear_scope("scope-a").unwrap();
+        assert_eq!(cleared, 2);
+        assert_eq!(storage.count().unwrap(), 1);
+
+        let all = storage.get_all().unwrap();
+        assert_eq!(all[0].id, "e3");
+    }
+
+    #[test]
+    fn test_clear_scope_no_match() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+        storage
+            .save(&make_scoped_entry("e1", "a", 100, "scope-a"))
+            .unwrap();
+
+        let cleared = storage.clear_scope("scope-z").unwrap();
+        assert_eq!(cleared, 0);
+        assert_eq!(storage.count().unwrap(), 1);
+    }
+
+    #[test]
     fn test_lru_eviction() {
         let (storage, _) = open_storage(Path::new(":memory:"), 2).unwrap();
         storage
@@ -439,7 +466,7 @@ mod tests {
             .save(&make_entry("e3", "rust borrow checker", 300, kind::MANUAL))
             .unwrap();
 
-        let results = searcher.search("rust", 5).unwrap();
+        let results = searcher.search("rust", None, 5).unwrap();
         assert_eq!(results.len(), 2);
         // Assert ordering by relevance (highest score first), not absolute values.
         assert!(
@@ -455,8 +482,30 @@ mod tests {
             .save(&make_entry("e1", "hello world", 100, kind::MANUAL))
             .unwrap();
 
-        let results = searcher.search("nonexistent", 5).unwrap();
+        let results = searcher.search("nonexistent", None, 5).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fts_search_scoped() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
+        storage
+            .save(&make_scoped_entry("e1", "rust programming", 100, "a"))
+            .unwrap();
+        storage
+            .save(&make_scoped_entry("e2", "rust borrow checker", 200, "b"))
+            .unwrap();
+
+        let results_a = searcher.search("rust", Some("a"), 5).unwrap();
+        assert_eq!(results_a.len(), 1);
+        assert_eq!(results_a[0].entry.id, "e1");
+
+        let results_b = searcher.search("rust", Some("b"), 5).unwrap();
+        assert_eq!(results_b.len(), 1);
+        assert_eq!(results_b[0].entry.id, "e2");
+
+        let results_all = searcher.search("rust", None, 5).unwrap();
+        assert_eq!(results_all.len(), 2);
     }
 
     #[test]
@@ -637,7 +686,7 @@ mod tests {
 
         // FTS query still matches content
         let (_, searcher) = open_storage(&db_path, 100).unwrap();
-        let results = searcher.search("runtime metadata", 10).unwrap();
+        let results = searcher.search("runtime metadata", None, 10).unwrap();
         assert!(
             results.iter().any(|r| r.entry.id == "a1"),
             "FTS search should still find the migrated entry's content"
@@ -726,21 +775,35 @@ mod tests {
             .save(&make_entry("e3", "third entry", 300, kind::SUMMARY))
             .unwrap();
 
-        let results = searcher.search(MATCH_ALL_QUERY, 10).unwrap();
+        let results = searcher.search(MATCH_ALL_QUERY, None, 10).unwrap();
         assert_eq!(results.len(), 3);
 
-        // Ordered by score descending (newest first since score = timestamp)
+        // Ordered by timestamp descending (newest first).
         assert_eq!(results[0].entry.id, "e3");
         assert_eq!(results[1].entry.id, "e2");
         assert_eq!(results[2].entry.id, "e1");
 
-        // Scores correspond to timestamps
-        assert!((results[0].score - 300.0).abs() < f64::EPSILON);
-        assert!((results[1].score - 200.0).abs() < f64::EPSILON);
-        assert!((results[2].score - 100.0).abs() < f64::EPSILON);
+        // Match-all results all share the same fixed score.
+        for r in &results {
+            assert!((r.score - 1.0).abs() < f64::EPSILON);
+        }
+    }
 
-        // Descending score order
-        assert!(results[0].score >= results[1].score);
-        assert!(results[1].score >= results[2].score);
+    #[test]
+    fn test_search_match_all_query_scoped() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
+        storage
+            .save(&make_scoped_entry("e1", "first entry", 100, "a"))
+            .unwrap();
+        storage
+            .save(&make_scoped_entry("e2", "second entry", 200, "b"))
+            .unwrap();
+
+        let results_a = searcher.search(MATCH_ALL_QUERY, Some("a"), 10).unwrap();
+        assert_eq!(results_a.len(), 1);
+        assert_eq!(results_a[0].entry.id, "e1");
+
+        let results_all = searcher.search(MATCH_ALL_QUERY, None, 10).unwrap();
+        assert_eq!(results_all.len(), 2);
     }
 }

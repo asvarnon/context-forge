@@ -1,12 +1,11 @@
 //! Core business logic: assembly, scoring, and snapshot management.
 
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::config::{CoreConfig, DEFAULT_RECENCY_HALF_LIFE_SECS};
+use crate::config::{Config, DEFAULT_RECENCY_HALF_LIFE_SECS};
 use crate::entry::ContextEntry;
-use crate::error::CoreError;
+use crate::error::Error;
 use crate::traits::{ContextStorage, Result, Searcher};
 
 /// Default candidate limit when fetching search results for assembly.
@@ -30,6 +29,7 @@ pub struct SaveOptions {
 }
 
 /// Estimate token count using whitespace heuristic (1 token ≈ 4 chars).
+#[must_use]
 pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
@@ -46,12 +46,7 @@ fn recency_decay(age_seconds: f64, half_life: f64) -> f64 {
 pub struct ContextEngine {
     storage: Box<dyn ContextStorage>,
     searcher: Box<dyn Searcher>,
-    config: CoreConfig,
-    /// Serializes `save_snapshot` calls within a single process.
-    /// Eviction happens atomically inside the storage layer.
-    /// Multi-process callers (separate CLI invocations) are not protected;
-    /// hook scheduling is relied on for exclusion.
-    write_lock: Mutex<()>,
+    config: Config,
 }
 
 impl ContextEngine {
@@ -60,10 +55,11 @@ impl ContextEngine {
     /// If `config.recency_half_life_secs` is not positive and finite, it is
     /// clamped to [`DEFAULT_RECENCY_HALF_LIFE_SECS`] to prevent NaN/inf in
     /// recency decay scoring.
+    #[must_use]
     pub fn new(
         storage: Box<dyn ContextStorage>,
         searcher: Box<dyn Searcher>,
-        mut config: CoreConfig,
+        mut config: Config,
     ) -> Self {
         if !config.recency_half_life_secs.is_finite() || config.recency_half_life_secs <= 0.0 {
             config.recency_half_life_secs = DEFAULT_RECENCY_HALF_LIFE_SECS;
@@ -73,18 +69,29 @@ impl ContextEngine {
             storage,
             searcher,
             config,
-            write_lock: Mutex::new(()),
         }
     }
 
     /// Assemble context entries that fit within `token_budget`.
     ///
-    /// 1. Searches for candidates matching `query`.
+    /// 1. Searches for candidates matching `query`, restricted to `scope` if given.
     /// 2. Applies recency weighting to each candidate's score.
     /// 3. Sorts by weighted score descending.
     /// 4. Packs entries greedily until the budget is exhausted.
-    pub fn assemble(&self, query: &str, token_budget: usize) -> Result<Vec<ContextEntry>> {
-        let candidates = self.searcher.search(query, DEFAULT_SEARCH_LIMIT)?;
+    ///
+    /// `scope = None` searches every entry regardless of scope (global recall).
+    /// `scope = Some(s)` restricts the search to entries whose `scope` equals `s`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying search fails.
+    pub fn assemble(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        token_budget: usize,
+    ) -> Result<Vec<ContextEntry>> {
+        let candidates = self.searcher.search(query, scope, DEFAULT_SEARCH_LIMIT)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -96,6 +103,12 @@ impl ContextEngine {
         let mut weighted: Vec<(f64, ContextEntry)> = candidates
             .into_iter()
             .map(|se| {
+                // Unix timestamps are well within f64's 52-bit mantissa for
+                // any realistic date range, so precision loss is not a concern.
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "Unix timestamps fit losslessly in f64 for millions of years"
+                )]
                 let age = (now - se.entry.timestamp).max(0) as f64;
                 let decay = recency_decay(age, half_life);
                 let weighted_score = se.score * decay;
@@ -124,9 +137,15 @@ impl ContextEngine {
     }
 
     /// Save a new snapshot entry. Capacity enforcement (LRU eviction) is
-    /// handled atomically by the storage layer.
+    /// handled atomically by the storage layer inside an immediate
+    /// transaction, so no in-process locking is required here.
     ///
     /// Returns the generated entry ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidEntry`] if `content` is empty, or propagates
+    /// any error from the underlying storage write.
     pub fn save_snapshot(
         &self,
         content: &str,
@@ -134,20 +153,12 @@ impl ContextEngine {
         options: &SaveOptions,
     ) -> Result<String> {
         if content.is_empty() {
-            return Err(CoreError::InvalidEntry("content must not be empty".into()));
+            return Err(Error::InvalidEntry("content must not be empty".into()));
         }
 
         let timestamp = current_timestamp();
         let id = Uuid::now_v7().to_string();
         let token_count = estimate_tokens(content);
-
-        // Eviction happens atomically inside the storage layer. Multi-process
-        // callers (separate CLI invocations) are not protected; hook
-        // scheduling is relied on for exclusion.
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let entry = ContextEntry {
             id: id.clone(),
@@ -164,14 +175,27 @@ impl ContextEngine {
 
         Ok(id)
     }
+
+    /// Return a reference to the underlying storage backend.
+    ///
+    /// This is exposed for callers that need direct access to storage
+    /// operations (delete, clear, count) not covered by [`Self::assemble`]
+    /// or [`Self::save_snapshot`].
+    #[must_use]
+    pub fn storage(&self) -> &dyn ContextStorage {
+        self.storage.as_ref()
+    }
 }
 
 /// Current Unix timestamp in seconds.
+///
+/// Returns `0` if the system clock reports a time before the Unix epoch,
+/// which should not happen on any supported platform.
 fn current_timestamp() -> i64 {
-    SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs() as i64
+        .map_or(0, |d| d.as_secs());
+    i64::try_from(secs).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -180,6 +204,7 @@ mod tests {
     use crate::config::{EvictionPolicy, DEFAULT_RECENCY_HALF_LIFE_SECS};
     use crate::entry::ScoredEntry;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     // -----------------------------------------------------------------------
     // Mock implementations
@@ -229,6 +254,13 @@ mod tests {
             Ok(n)
         }
 
+        fn clear_scope(&self, scope: &str) -> Result<usize> {
+            let mut guard = self.entries.lock().unwrap();
+            let before = guard.len();
+            guard.retain(|e| e.scope.as_deref() != Some(scope));
+            Ok(before - guard.len())
+        }
+
         fn count(&self) -> Result<usize> {
             Ok(self.entries.lock().unwrap().len())
         }
@@ -251,14 +283,19 @@ mod tests {
     }
 
     impl Searcher for MockSearcher {
-        fn search(&self, _query: &str, limit: usize) -> Result<Vec<ScoredEntry>> {
+        fn search(
+            &self,
+            _query: &str,
+            _scope: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<ScoredEntry>> {
             let guard = self.results.lock().unwrap();
             Ok(guard.iter().take(limit).cloned().collect())
         }
     }
 
-    fn default_config(max_entries: usize) -> CoreConfig {
-        CoreConfig {
+    fn default_config(max_entries: usize) -> Config {
+        Config {
             max_entries,
             token_budget: 8192,
             db_path: PathBuf::from(":memory:"),
@@ -325,12 +362,12 @@ mod tests {
         );
 
         // Budget of 2 tokens: "short" = 2 tokens fits exactly.
-        let assembled = engine.assemble("test", 2).unwrap();
+        let assembled = engine.assemble("test", None, 2).unwrap();
         assert_eq!(assembled.len(), 1);
         assert_eq!(assembled[0].id, "a");
 
         // Budget large enough for all.
-        let assembled = engine.assemble("test", 1000).unwrap();
+        let assembled = engine.assemble("test", None, 1000).unwrap();
         assert_eq!(assembled.len(), 3);
     }
 
@@ -351,7 +388,7 @@ mod tests {
         );
 
         // Budget = 5: "big" (1000 tokens) is skipped, "fits" (1 token) is returned.
-        let assembled = engine.assemble("test", 5).unwrap();
+        let assembled = engine.assemble("test", None, 5).unwrap();
         assert_eq!(assembled.len(), 1);
         assert_eq!(assembled[0].id, "small");
     }
@@ -363,7 +400,7 @@ mod tests {
             Box::new(MockSearcher::empty()),
             default_config(100),
         );
-        let assembled = engine.assemble("anything", 1000).unwrap();
+        let assembled = engine.assemble("anything", None, 1000).unwrap();
         assert!(assembled.is_empty());
     }
 
@@ -382,7 +419,7 @@ mod tests {
             default_config(100),
         );
 
-        let assembled = engine.assemble("test", 1000).unwrap();
+        let assembled = engine.assemble("test", None, 1000).unwrap();
         assert_eq!(assembled.len(), 2);
         // Newer entry should rank first due to higher recency score.
         assert_eq!(assembled[0].id, "new");

@@ -10,7 +10,8 @@ pub const DEFAULT_RECENCY_HALF_LIFE_SECS: f64 = DEFAULT_RECENCY_HALF_LIFE_HOURS 
 
 /// Runtime configuration for the context engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoreConfig {
+#[non_exhaustive]
+pub struct Config {
     /// Maximum number of entries to retain.
     pub max_entries: usize,
     /// Total token budget for context injection.
@@ -26,8 +27,23 @@ pub struct CoreConfig {
     pub recency_half_life_secs: f64,
 }
 
+impl Default for Config {
+    /// Defaults: 10,000 max entries, an 8,192-token budget, an in-memory
+    /// database, LRU eviction, and the default 72-hour recency half-life.
+    fn default() -> Self {
+        Self {
+            max_entries: 10_000,
+            token_budget: 8192,
+            db_path: PathBuf::from(":memory:"),
+            eviction_policy: EvictionPolicy::Lru,
+            recency_half_life_secs: DEFAULT_RECENCY_HALF_LIFE_SECS,
+        }
+    }
+}
+
 /// Strategy for evicting entries when at capacity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EvictionPolicy {
     /// Least-recently-used entries are evicted first.
     Lru,
