@@ -54,7 +54,7 @@ durable storage.
 |---|---|---|---|
 | `analysis` | yes | `stop-words` | Importance-detection pipeline (tokenizer, lexicon, scoring). Used internally for future ranking work. |
 | `parallel` | no | `rayon` | Reserved for Phase 4 (parallel scoring). Not yet implemented. |
-| `distill-http` | no | `reqwest` | Reserved for Phase 5 (local-LLM summarization via an OpenAI-compatible endpoint). Not yet implemented. |
+| `distill-http` | no | `reqwest` | OpenAI-compatible local-LLM distillation (Ollama/llama-server). |
 
 ## Async callers
 
@@ -146,11 +146,10 @@ Entries carry a `scope` field (e.g. `"discord:thread:42"`,
 This crate is mid-refactor from a Claude Code compaction-memory plugin into a
 general-purpose library. Phases 0–3 are complete: single-crate layout, data
 model generalization, public API facade, and save-time secret scrubbing.
-Planned:
+Phase 5 (`distill-http` — local-LLM thread distillation via an
+OpenAI-compatible endpoint) is also complete. Planned:
 
 - Phase 4 — `parallel` (rayon-based parallel scoring).
-- Phase 5 — `distill-http` (local-LLM thread distillation via an
-  OpenAI-compatible endpoint).
 - Phase 6 — integration into downstream consumers (homelab-rs).
 - Phase 7 — crates.io publish metadata and release process.
 

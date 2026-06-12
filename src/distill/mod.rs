@@ -59,6 +59,16 @@ pub enum FactKind {
 pub trait Distiller: Send + Sync {
     /// Distill `transcript` into a summary and a list of durable facts.
     ///
+    /// # Security
+    ///
+    /// Implementations transmit `transcript` verbatim to the underlying
+    /// model or service — no secret scrubbing is applied at this layer.
+    /// [`ContextForge::distill_and_save`](crate::ContextForge::distill_and_save)
+    /// is the only entry point that scrubs secrets (via
+    /// [`scrub_secrets`](crate::scrub_secrets)) before a transcript reaches
+    /// a [`Distiller`]; callers invoking [`Distiller::distill`] directly are
+    /// responsible for scrubbing first.
+    ///
     /// # Errors
     ///
     /// Returns an error if distillation fails (e.g. the backing model or

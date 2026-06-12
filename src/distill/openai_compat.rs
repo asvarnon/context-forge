@@ -249,9 +249,14 @@ impl OpenAiCompatDistiller {
     }
 
     /// Builds a blocking HTTP client with the given timeout.
+    ///
+    /// Redirects are disabled: there is no legitimate redirect for a
+    /// `/chat/completions` endpoint, and following one would be an
+    /// egress-redirection vector.
     fn build_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
         reqwest::blocking::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| Error::Distill(format!("failed to build HTTP client: {e}")))
     }
@@ -261,17 +266,27 @@ impl OpenAiCompatDistiller {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    /// Sends a chat completion request and returns the parsed response
-    /// envelope, or an error describing why the HTTP call itself failed
-    /// (network error, non-2xx status, or non-JSON body).
-    fn send(&self, body: &ChatRequest<'_>) -> Result<ChatResponse> {
-        let response = self
-            .client
-            .post(self.endpoint())
-            .json(body)
-            .send()
-            .map_err(|e| Error::Distill(format!("request failed: {e}")))?;
+    /// Sends a chat completion request over the wire.
+    ///
+    /// Returns the raw [`reqwest::Error`] on failure so the caller can
+    /// distinguish a transport-level failure (connection refused, timeout,
+    /// request build error) from a response that was received but rejected
+    /// — only the latter triggers the prompt-embedded fallback.
+    fn send_raw(
+        &self,
+        body: &ChatRequest<'_>,
+    ) -> std::result::Result<reqwest::blocking::Response, reqwest::Error> {
+        self.client.post(self.endpoint()).json(body).send()
+    }
 
+    /// Sends a chat completion request and returns the parsed response
+    /// envelope, or an [`Error::Distill`] describing why the HTTP call
+    /// itself failed (non-2xx status or non-JSON body).
+    ///
+    /// Transport-level failures are not represented by this function's
+    /// return type — callers should call [`Self::send_raw`] directly when
+    /// they need to distinguish transport errors from response rejections.
+    fn parse_response(response: reqwest::blocking::Response) -> Result<ChatResponse> {
         if !response.status().is_success() {
             return Err(Error::Distill(format!(
                 "non-success status: {}",
@@ -301,7 +316,16 @@ impl OpenAiCompatDistiller {
 
     /// Attempt 1: request with `response_format` set, parsing the content
     /// strictly as JSON.
-    fn attempt_structured(&self, transcript: &str) -> Result<DistilledMemory> {
+    ///
+    /// Returns [`AttemptError::Transport`] if the request itself could not
+    /// be sent (connection refused, timed out, or could not be built) — the
+    /// caller should not retry via [`Self::attempt_prompt_embedded`] in that
+    /// case, since attempt 2 would fail the same way. Any other failure
+    /// (non-2xx status, unparsable body) is [`AttemptError::Rejected`].
+    fn attempt_structured(
+        &self,
+        transcript: &str,
+    ) -> std::result::Result<DistilledMemory, AttemptError> {
         let body = ChatRequest {
             model: &self.model,
             messages: vec![
@@ -317,10 +341,10 @@ impl OpenAiCompatDistiller {
             response_format: Some(response_format_payload(self.schema_style)),
         };
 
-        let response = self.send(&body)?;
+        let raw = self.send_raw(&body).map_err(AttemptError::from)?;
+        let response = Self::parse_response(raw)?;
         let content = Self::message_content(response)?;
-        serde_json::from_str(&content)
-            .map_err(|e| Error::Distill(format!("failed to parse structured response: {e}")))
+        serde_json::from_str(&content).map_err(|_| AttemptError::Rejected)
     }
 
     /// Attempt 2: request with no `response_format` and the schema embedded
@@ -347,7 +371,10 @@ and nothing else:\n{schema}"
             response_format: None,
         };
 
-        let response = self.send(&body)?;
+        let raw = self
+            .send_raw(&body)
+            .map_err(|e| Error::Distill(format!("request failed: {e}")))?;
+        let response = Self::parse_response(raw)?;
         let content = Self::message_content(response)?;
         let stripped = strip_code_fences(&content);
         serde_json::from_str(stripped)
@@ -355,13 +382,52 @@ and nothing else:\n{schema}"
     }
 }
 
+/// The outcome of [`OpenAiCompatDistiller::attempt_structured`]'s failure
+/// modes, distinguishing transport failures (which should not trigger the
+/// prompt-embedded fallback) from response rejections (which should).
+enum AttemptError {
+    /// The request could not be sent at all: connection refused, DNS
+    /// failure, timed out, or the request could not be built.
+    Transport(reqwest::Error),
+    /// A response was received but rejected: non-2xx status, an unparsable
+    /// envelope, missing content, or content that did not match
+    /// [`DistilledMemory`].
+    Rejected,
+}
+
+impl From<reqwest::Error> for AttemptError {
+    fn from(e: reqwest::Error) -> Self {
+        if e.is_timeout() || e.is_connect() || e.is_request() {
+            AttemptError::Transport(e)
+        } else {
+            AttemptError::Rejected
+        }
+    }
+}
+
+impl From<Error> for AttemptError {
+    fn from(_: Error) -> Self {
+        AttemptError::Rejected
+    }
+}
+
 impl Distiller for OpenAiCompatDistiller {
+    /// # Security
+    ///
+    /// This implementation transmits `transcript` verbatim to the
+    /// configured `base_url` — no secret scrubbing is applied at this
+    /// layer. [`ContextForge::distill_and_save`](crate::ContextForge::distill_and_save)
+    /// is the only entry point that scrubs secrets (via
+    /// [`scrub_secrets`](crate::scrub_secrets)) before a transcript reaches
+    /// a [`Distiller`]. Callers invoking [`Distiller::distill`] directly are
+    /// responsible for scrubbing first.
     fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
         let truncated = truncate_keep_end(transcript, self.max_transcript_chars);
 
         match self.attempt_structured(truncated) {
             Ok(memory) => Ok(memory),
-            Err(_) => self.attempt_prompt_embedded(truncated),
+            Err(AttemptError::Transport(e)) => Err(Error::Distill(format!("request failed: {e}"))),
+            Err(AttemptError::Rejected) => self.attempt_prompt_embedded(truncated),
         }
     }
 }
@@ -648,5 +714,43 @@ mod tests {
         let distiller = distiller_for(&url);
         let err = distiller.distill("hello transcript").unwrap_err();
         assert!(matches!(err, Error::Distill(_)));
+    }
+
+    #[test]
+    fn transport_error_does_not_trigger_fallback() {
+        // A listener that accepts a connection and then writes nothing,
+        // forcing the client to time out. Records how many connections it
+        // accepted so the test can assert there was no second (fallback)
+        // attempt.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = mpsc::channel::<()>();
+
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    return;
+                };
+                let _ = tx.send(());
+                // Hold the connection open without responding, then drop it
+                // once the test is done so the thread can exit.
+                thread::sleep(Duration::from_secs(10));
+                drop(stream);
+            }
+        });
+
+        let url = format!("http://{addr}");
+        let distiller = OpenAiCompatDistiller::new(&url, "test-model")
+            .expect("construct distiller")
+            .with_timeout_secs(1)
+            .expect("set timeout");
+
+        let err = distiller.distill("hello transcript").unwrap_err();
+        assert!(matches!(err, Error::Distill(_)));
+
+        // Exactly one connection should have been accepted: a transport
+        // error (timeout) must not trigger the prompt-embedded fallback.
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
     }
 }
