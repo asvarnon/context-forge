@@ -84,7 +84,7 @@ impl SqliteStorage {
     }
 
     /// Return a reference-counted handle to the connection pool so that
-    /// [`SqliteSearcher`](crate::storage::SqliteSearcher) can share it.
+    /// [`SqliteSearcher`] can share it.
     #[must_use]
     pub fn pool(&self) -> Arc<Pool<SqliteConnectionManager>> {
         Arc::clone(&self.pool)

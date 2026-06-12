@@ -107,7 +107,7 @@ fn pattern_set() -> &'static Vec<Pattern> {
 /// `[REDACTED:<label>]`.
 ///
 /// If `config.enabled` is `false`, returns `text` unchanged (borrowed, no
-/// allocation). Otherwise applies every pattern in [`PATTERN_SOURCES`] in
+/// allocation). Otherwise applies every built-in redaction pattern in
 /// order; the result is allocation-free (`Cow::Borrowed`) when no pattern
 /// matches.
 #[must_use]
