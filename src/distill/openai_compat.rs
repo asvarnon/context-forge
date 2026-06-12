@@ -173,6 +173,14 @@ struct ChatResponseMessage {
 /// A [`Distiller`] that talks to an OpenAI-compatible `/chat/completions`
 /// endpoint such as Ollama or llama-server.
 ///
+/// # HTTP only
+///
+/// This client is built without a TLS stack and supports `http://` base URLs
+/// only — it targets local or LAN/VPN inference endpoints (Ollama,
+/// llama-server). An `https://` base URL fails at request time with
+/// [`Error::Distill`]. If you need a remote TLS endpoint, implement
+/// [`Distiller`] with your own HTTP client.
+///
 /// # Fallback behaviour
 ///
 /// Some local model servers respond `HTTP 200` with unconstrained text when
