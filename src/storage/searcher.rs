@@ -3,13 +3,12 @@ use std::sync::Arc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
-use cf_core::engine::MATCH_ALL_QUERY;
-use cf_core::entry::ScoredEntry;
-use cf_core::error::CoreError;
-use cf_core::traits::Searcher;
-use cf_core::Result;
-
-use crate::schema::row_to_entry;
+use crate::engine::MATCH_ALL_QUERY;
+use crate::entry::ScoredEntry;
+use crate::error::CoreError;
+use crate::storage::schema::row_to_entry;
+use crate::traits::Searcher;
+use crate::Result;
 
 /// FTS5-backed full-text search over stored context entries.
 pub struct SqliteSearcher {

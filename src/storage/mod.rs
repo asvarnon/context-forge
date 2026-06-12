@@ -1,19 +1,318 @@
-pub mod adapter;
+use std::path::Path;
+use std::sync::Arc;
+
+use r2d2::{CustomizeConnection, Pool};
+use r2d2_sqlite::SqliteConnectionManager;
+
+use crate::entry::ContextEntry;
+use crate::error::CoreError;
+use crate::storage::schema::{kind_to_str, migrate, row_to_entry};
+use crate::traits::ContextStorage;
+
 pub mod schema;
 pub mod searcher;
-pub mod storage;
 
 pub use searcher::SqliteSearcher;
-pub use storage::SqliteStorage;
 
 /// Create a paired storage + searcher sharing the same connection pool.
 pub fn open_storage(
-    db_path: &std::path::Path,
+    db_path: &Path,
     max_entries: usize,
-) -> cf_core::Result<(SqliteStorage, SqliteSearcher)> {
+) -> crate::Result<(SqliteStorage, SqliteSearcher)> {
     let storage = SqliteStorage::open(db_path, max_entries)?;
     let searcher = SqliteSearcher::new(storage.pool());
     Ok((storage, searcher))
+}
+
+#[derive(Debug)]
+struct PragmaCustomizer;
+
+impl CustomizeConnection<rusqlite::Connection, rusqlite::Error> for PragmaCustomizer {
+    fn on_acquire(
+        &self,
+        conn: &mut rusqlite::Connection,
+    ) -> std::result::Result<(), rusqlite::Error> {
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
+        )?;
+        Ok(())
+    }
+}
+
+/// SQLite-backed implementation of [`ContextStorage`].
+pub struct SqliteStorage {
+    pool: Arc<Pool<SqliteConnectionManager>>,
+    max_entries: usize,
+}
+
+impl SqliteStorage {
+    /// Open (or create) a SQLite database at `db_path` and run migrations.
+    ///
+    /// For `":memory:"`, a single-connection pool is used so that all operations
+    /// share the same in-memory database instance.
+    pub fn open(db_path: &Path, max_entries: usize) -> crate::Result<Self> {
+        let manager = SqliteConnectionManager::file(db_path);
+        let mut builder = Pool::builder().connection_customizer(Box::new(PragmaCustomizer));
+
+        // Each `:memory:` connection is a distinct in-memory database.
+        // Restrict to a single connection so all callers see the same DB.
+        if db_path == Path::new(":memory:") {
+            builder = builder.max_size(1);
+        } else {
+            builder = builder.max_size(4);
+        }
+
+        let pool = builder
+            .build(manager)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        let conn = pool.get().map_err(|e| CoreError::Storage(e.to_string()))?;
+        migrate(&conn)?;
+
+        Ok(Self {
+            pool: Arc::new(pool),
+            max_entries,
+        })
+    }
+
+    /// Return a reference-counted handle to the connection pool so that
+    /// [`SqliteSearcher`](crate::storage::SqliteSearcher) can share it.
+    pub fn pool(&self) -> Arc<Pool<SqliteConnectionManager>> {
+        Arc::clone(&self.pool)
+    }
+
+    /// Return the current schema version from the database.
+    pub fn schema_version(&self) -> crate::Result<i64> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))
+    }
+
+    /// Run a WAL checkpoint (TRUNCATE mode) to flush the WAL file.
+    ///
+    /// Safe to call at any time; no-op if no WAL pages are pending.
+    pub fn checkpoint(&self) -> crate::Result<()> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| CoreError::Storage(e.to_string()))
+    }
+}
+
+impl ContextStorage for SqliteStorage {
+    fn save(&self, entry: &ContextEntry) -> crate::Result<()> {
+        let mut conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        // LRU eviction: only evict when inserting a new entry (not replacing
+        // an existing ID) and currently at capacity.
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+                [&entry.id],
+                |r| r.get(0),
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        if !exists {
+            let current_count: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+            if current_count as usize >= self.max_entries {
+                tx.execute(
+                    "DELETE FROM entries WHERE id = (\
+                     SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
+                    [],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            }
+        }
+
+        tx.execute(
+            "INSERT OR REPLACE INTO entries (
+                id,
+                content,
+                timestamp,
+                kind,
+                token_count,
+                session_id,
+                compaction_count,
+                compaction_trigger,
+                runtime,
+                model,
+                cwd,
+                git_branch,
+                git_sha,
+                turn_id,
+                agent_type,
+                agent_id
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+            )",
+            rusqlite::params![
+                entry.id,
+                entry.content,
+                entry.timestamp,
+                kind_to_str(&entry.kind),
+                entry.token_count.map(|v| v as i64),
+                entry.session_id,
+                entry.compaction_count,
+                entry.compaction_trigger,
+                entry.runtime,
+                entry.model,
+                entry.cwd,
+                entry.git_branch,
+                entry.git_sha,
+                entry.turn_id,
+                entry.agent_type,
+                entry.agent_id,
+            ],
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn get_top_k(&self, k: usize) -> crate::Result<Vec<ContextEntry>> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    id,
+                    content,
+                    timestamp,
+                    kind,
+                    token_count,
+                    session_id,
+                    compaction_count,
+                    compaction_trigger,
+                    runtime,
+                    model,
+                    cwd,
+                    git_branch,
+                    git_sha,
+                    turn_id,
+                    agent_type,
+                    agent_id
+                 FROM entries
+                 ORDER BY timestamp DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        let entries = stmt
+            .query_map([k as i64], row_to_entry)
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Ok(entries)
+    }
+
+    fn get_all(&self) -> crate::Result<Vec<ContextEntry>> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    id,
+                    content,
+                    timestamp,
+                    kind,
+                    token_count,
+                    session_id,
+                    compaction_count,
+                    compaction_trigger,
+                    runtime,
+                    model,
+                    cwd,
+                    git_branch,
+                    git_sha,
+                    turn_id,
+                    agent_type,
+                    agent_id
+                 FROM entries
+                 ORDER BY timestamp DESC",
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        let entries = stmt
+            .query_map([], row_to_entry)
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Ok(entries)
+    }
+
+    fn delete(&self, id: &str) -> crate::Result<bool> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let changes = conn
+            .execute("DELETE FROM entries WHERE id = ?1", [id])
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(changes > 0)
+    }
+
+    fn clear(&self) -> crate::Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let changes = conn
+            .execute("DELETE FROM entries", [])
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(changes)
+    }
+
+    fn count(&self) -> crate::Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(count as usize)
+    }
+
+    fn max_compaction_count(&self, session_id: &str) -> crate::Result<Option<i64>> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.query_row(
+            "SELECT MAX(compaction_count) FROM entries WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -22,13 +321,12 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use cf_core::engine::MATCH_ALL_QUERY;
-    use cf_core::entry::{ContextEntry, EntryKind};
-    use cf_core::traits::{ContextStorage, Searcher};
     use rusqlite::Connection;
-    use serde_json::json;
 
-    use crate::{open_storage, SqliteStorage};
+    use crate::engine::MATCH_ALL_QUERY;
+    use crate::entry::{ContextEntry, EntryKind};
+    use crate::storage::{open_storage, SqliteStorage};
+    use crate::traits::{ContextStorage, Searcher};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -222,7 +520,7 @@ mod tests {
         let storage1 = SqliteStorage::open(Path::new(":memory:"), 100).unwrap();
         let conn = storage1.pool().get().unwrap();
         // Running migrate a second time on the same connection should succeed.
-        crate::schema::migrate(&conn).unwrap();
+        crate::storage::schema::migrate(&conn).unwrap();
     }
 
     #[test]
@@ -231,7 +529,8 @@ mod tests {
 
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(crate::schema::SCHEMA_V1).unwrap();
+            conn.execute_batch(crate::storage::schema::SCHEMA_V1)
+                .unwrap();
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)",
             )
@@ -369,184 +668,6 @@ mod tests {
         assert_eq!(got.turn_id, entry.turn_id);
         assert_eq!(got.agent_type, entry.agent_type);
         assert_eq!(got.agent_id, entry.agent_id);
-    }
-
-    #[test]
-    fn test_save_with_metadata_claude_code_sets_fields_and_persists_raw_json() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-
-        let mut entry = make_entry(
-            "meta-claude",
-            "compact summary",
-            1_700_000_111,
-            EntryKind::Auto,
-        );
-        entry.session_id = Some("existing-session".into());
-
-        let raw_json = json!({
-            "source": "compact",
-            "session_id": "mapped-session",
-            "model": "claude-3.7",
-            "cwd": "/tmp/project",
-            "matcher_value": "token_limit",
-            "agent_type": "assistant",
-            "agent_id": "agent-1"
-        });
-
-        storage
-            .save_with_metadata(&mut entry, &raw_json, None)
-            .unwrap();
-
-        let stored = storage.get_all().unwrap();
-        assert_eq!(stored.len(), 1);
-        let got = &stored[0];
-
-        // Existing session_id is preserved and never overwritten by mappings.
-        assert_eq!(got.session_id.as_deref(), Some("existing-session"));
-        assert_eq!(got.runtime.as_deref(), Some("claude-code"));
-        assert_eq!(got.model.as_deref(), Some("claude-3.7"));
-        assert_eq!(got.cwd.as_deref(), Some("/tmp/project"));
-        assert_eq!(got.compaction_trigger.as_deref(), Some("token_limit"));
-        assert_eq!(got.agent_type.as_deref(), Some("assistant"));
-        assert_eq!(got.agent_id.as_deref(), Some("agent-1"));
-
-        let conn = storage.pool().get().unwrap();
-        let (runtime, raw): (String, String) = conn
-            .query_row(
-                "SELECT runtime, raw_json FROM entry_metadata_raw WHERE entry_id = ?1",
-                [&entry.id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(runtime, "claude-code");
-        assert_eq!(raw, serde_json::to_string(&raw_json).unwrap());
-    }
-
-    #[test]
-    fn test_save_with_metadata_codex_maps_thread_id_and_git_fields() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-
-        let mut entry = make_entry(
-            "meta-codex",
-            "codex summary",
-            1_700_000_222,
-            EntryKind::Auto,
-        );
-        let raw_json = json!({
-            "threadId": "thread-42",
-            "turnId": "turn-9",
-            "git": {
-                "branch": "feature/runtime-adapter",
-                "sha": "abc123"
-            }
-        });
-
-        storage
-            .save_with_metadata(&mut entry, &raw_json, None)
-            .unwrap();
-
-        let stored = storage.get_all().unwrap();
-        assert_eq!(stored.len(), 1);
-        let got = &stored[0];
-
-        assert_eq!(got.runtime.as_deref(), Some("codex"));
-        assert_eq!(got.session_id.as_deref(), Some("thread-42"));
-        assert_eq!(got.turn_id.as_deref(), Some("turn-9"));
-        assert_eq!(got.git_branch.as_deref(), Some("feature/runtime-adapter"));
-        assert_eq!(got.git_sha.as_deref(), Some("abc123"));
-
-        let conn = storage.pool().get().unwrap();
-        let metadata_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM entry_metadata_raw WHERE entry_id = ?1",
-                [&entry.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(metadata_count, 1);
-    }
-
-    #[test]
-    fn test_save_with_metadata_cline_runtime() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        let payload = json!({
-            "sessionId": "sid-cline-1",
-            "model": "claude-3.5-sonnet"
-        });
-
-        let mut entry = make_entry("cline1", "cline conversation", 1000, EntryKind::Auto);
-        storage
-            .save_with_metadata(&mut entry, &payload, None)
-            .unwrap();
-
-        assert_eq!(entry.runtime.as_deref(), Some("cline"));
-    }
-
-    #[test]
-    fn test_save_with_metadata_openclaw_runtime() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        let payload = json!({
-            "sessionKey": "sk-oc-1",
-            "cwd": "/home/user/project"
-        });
-
-        let mut entry = make_entry("oc1", "openclaw conversation", 1000, EntryKind::Auto);
-        storage
-            .save_with_metadata(&mut entry, &payload, None)
-            .unwrap();
-
-        assert_eq!(entry.runtime.as_deref(), Some("openclaw"));
-    }
-
-    #[test]
-    fn test_save_with_metadata_gemini_runtime() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        let payload = json!({
-            "session_id": "gem-sess-1",
-            "model": "gemini-2.0-flash"
-        });
-
-        let mut entry = make_entry("gem1", "gemini conversation", 1000, EntryKind::Auto);
-        entry.session_id = None; // ensure adapter fills it
-        storage
-            .save_with_metadata(&mut entry, &payload, None)
-            .unwrap();
-
-        assert_eq!(entry.runtime.as_deref(), Some("gemini"));
-        assert_eq!(entry.session_id.as_deref(), Some("gem-sess-1"));
-    }
-
-    #[test]
-    fn test_save_with_metadata_unknown_runtime_saves_entry_without_metadata_row() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-
-        let mut entry = make_entry(
-            "meta-unknown",
-            "unknown runtime",
-            1_700_000_333,
-            EntryKind::Auto,
-        );
-        let raw_json = json!({
-            "foo": "bar"
-        });
-
-        storage
-            .save_with_metadata(&mut entry, &raw_json, None)
-            .unwrap();
-
-        let stored = storage.get_all().unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].runtime, None);
-
-        let conn = storage.pool().get().unwrap();
-        let metadata_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM entry_metadata_raw WHERE entry_id = ?1",
-                [&entry.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(metadata_count, 0);
     }
 
     #[test]

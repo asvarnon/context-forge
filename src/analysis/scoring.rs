@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::classification::{ClassifiedPassage, ImportanceCategory};
-use crate::recurrence::RecurrenceResult;
+use crate::analysis::classification::{ClassifiedPassage, ImportanceCategory};
+use crate::analysis::recurrence::RecurrenceResult;
 
 /// Default importance recency half-life: 7 days in seconds.
 const DEFAULT_IMPORTANCE_HALF_LIFE_SECS: f64 = 604_800.0;
@@ -216,8 +216,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{pack_segments, score_passages, ImportanceSegment, ScoringConfig};
-    use crate::classification::{ClassifiedPassage, ImportanceCategory};
-    use crate::recurrence::RecurrenceResult;
+    use crate::analysis::classification::{ClassifiedPassage, ImportanceCategory};
+    use crate::analysis::recurrence::RecurrenceResult;
 
     const NOW: i64 = 2_000_000_000;
 

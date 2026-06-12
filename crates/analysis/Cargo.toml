@@ -1,7 +1,0 @@
-[package]
-name = "cf-analysis"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-stop-words = { workspace = true }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ngrams::{bigrams, trigrams};
+use crate::analysis::ngrams::{bigrams, trigrams};
 
 /// Compute term counts for a list of tokens.
 ///

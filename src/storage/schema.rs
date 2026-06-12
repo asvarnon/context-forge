@@ -1,7 +1,8 @@
-use cf_core::entry::{ContextEntry, EntryKind};
-use cf_core::error::CoreError;
-use cf_core::Result;
 use rusqlite::Connection;
+
+use crate::entry::{ContextEntry, EntryKind};
+use crate::error::CoreError;
+use crate::Result;
 
 const CREATE_SCHEMA_VERSION: &str =
     "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)";

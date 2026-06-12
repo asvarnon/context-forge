@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::scoring::ScoringConfig;
+use crate::analysis::scoring::ScoringConfig;
 
 /// Configuration for progressive injection policy.
 #[derive(Debug, Clone)]

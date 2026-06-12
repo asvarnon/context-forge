@@ -1,8 +1,6 @@
-#![warn(clippy::pedantic)]
-
-//! `cf-analysis` - text analysis primitives for importance detection.
+//! Text analysis primitives for importance detection.
 //!
-//! This crate is pure computation - no I/O, no storage, no network.
+//! This module is pure computation - no I/O, no storage, no network.
 //! It provides tokenization, stopword filtering, n-gram extraction,
 //! and term count computation.
 

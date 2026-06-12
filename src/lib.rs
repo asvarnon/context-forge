@@ -1,14 +1,18 @@
-//! `cf-core` — types, traits, and error definitions for the context-forge engine.
+//! `context-forge` — a compaction-aware persistent memory engine for AI coding agents.
 //!
-//! This crate contains **zero I/O**. It defines the data model, trait contracts,
-//! configuration structs, and error types that the rest of the workspace depends on.
+//! This crate provides the data model, trait contracts, configuration structs,
+//! error types, the assembly engine, and a SQLite-backed storage implementation.
 
 pub mod config;
 pub mod engine;
 pub mod entry;
 pub mod error;
 pub mod session;
+pub mod storage;
 pub mod traits;
+
+#[cfg(feature = "analysis")]
+pub mod analysis;
 
 // Re-export primary types at crate root for convenience.
 pub use config::{CoreConfig, EvictionPolicy};
@@ -16,6 +20,7 @@ pub use engine::{ContextEngine, SaveOptions};
 pub use entry::{ContextEntry, EntryKind, ScoredEntry};
 pub use error::CoreError;
 pub use session::{group_entries_by_session, SessionGroup};
+pub use storage::{open_storage, SqliteSearcher, SqliteStorage};
 pub use traits::{ContextStorage, Result, Searcher};
 
 #[cfg(test)]

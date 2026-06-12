@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::lexicon::Lexicons;
+use crate::analysis::lexicon::Lexicons;
 
 /// Classification configuration.
 #[derive(Debug, Clone)]
@@ -624,7 +624,7 @@ fn raw_word_ends_sentence(raw_word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{classify_passages, ClassificationConfig, ImportanceCategory, PassageContext};
-    use crate::lexicon::Lexicons;
+    use crate::analysis::lexicon::Lexicons;
 
     fn passage(text: &str, terms: &[&str], session_id: &str, timestamp: i64) -> PassageContext {
         PassageContext {
