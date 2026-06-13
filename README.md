@@ -9,25 +9,27 @@ searchable memory across sessions.
 
 ## Installation
 
-> **Pre-release notice:** `0.5.0-beta.3` is a pre-release. The public API may
-> still change between betas based on integration feedback. Pin the **exact**
-> version — caret ranges (`^0.5.0-beta.3`, or the bare `"0.5.0-beta.3"` Cargo
-> writes by default) never match pre-release versions across betas, so an
-> exact pin is required either way:
+> **Pre-release notice:** the current release is a `0.5.0-beta` pre-release
+> (see [crates.io](https://crates.io/crates/context-forge/versions) for the
+> latest beta). The public API may still change between betas based on
+> integration feedback. Pin the **exact** version — caret ranges and the bare
+> version string Cargo writes by default never match pre-release versions, so
+> an exact pin is required. Replace `<latest-beta>` below with the current
+> version:
 >
 > ```toml
-> context-forge = "=0.5.0-beta.3"
+> context-forge = "=0.5.0-<latest-beta>"
 > ```
 
 ```sh
-cargo add context-forge@0.5.0-beta.3
+cargo add context-forge@=0.5.0-<latest-beta>
 ```
 
 or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-context-forge = "=0.5.0-beta.3"
+context-forge = "=0.5.0-<latest-beta>"
 ```
 
 ## Quick start
@@ -174,6 +176,6 @@ an OpenAI-compatible endpoint (`distill-http`).
 
 Published as a **`0.5.0-beta`** pre-release while the API proves itself in a
 real downstream consumer. Because it is a pre-release, depend on it with an
-exact pin (`context-forge = "=0.5.0-beta.3"`) — Cargo's default version ranges
-never match pre-release versions. Any breaking changes that integration
-surfaces land as further betas before the final `0.5.0` cut.
+exact version pin (see [Installation](#installation)) — Cargo's default
+version ranges never match pre-release versions. Any breaking changes that
+integration surfaces land as further betas before the final `0.5.0` cut.
