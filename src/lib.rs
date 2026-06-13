@@ -178,6 +178,15 @@ impl ContextForge {
     /// `kind::FACT` and metadata `{"fact_kind": "<kind>", "source":
     /// "distill"}`.
     ///
+    /// The distilled output is bounded before any of it is saved: at most
+    /// [`MAX_FACTS`](crate::distill::MAX_FACTS) facts are kept, each fact's
+    /// text is truncated to at most
+    /// [`MAX_FACT_CHARS`](crate::distill::MAX_FACT_CHARS) characters, and the
+    /// summary is truncated to at most
+    /// [`MAX_SUMMARY_CHARS`](crate::distill::MAX_SUMMARY_CHARS) characters.
+    /// Excess facts and text beyond these limits are silently dropped or
+    /// truncated, since they are untrusted model-generated content.
+    ///
     /// Returns the IDs of the saved entries: the summary's ID first,
     /// followed by each fact's ID in order.
     ///
@@ -192,6 +201,7 @@ impl ContextForge {
     ) -> Result<Vec<String>> {
         let scrubbed_transcript = scrub_secrets(transcript, &self.scrub_config);
         let memory = distiller.distill(&scrubbed_transcript)?;
+        let memory = crate::distill::cap_distilled_memory(memory);
 
         let mut ids = Vec::with_capacity(1 + memory.facts.len());
 
@@ -497,5 +507,48 @@ mod tests {
             assert_eq!(metadata["source"], "distill");
             assert!(metadata["fact_kind"].is_string());
         }
+    }
+
+    /// A stub [`Distiller`] that returns a fixed number of facts, used to
+    /// verify that [`ContextForge::distill_and_save`] caps excess facts
+    /// before persisting them.
+    struct ManyFactsDistiller {
+        fact_count: usize,
+    }
+
+    impl Distiller for ManyFactsDistiller {
+        fn distill(&self, _transcript: &str) -> Result<DistilledMemory> {
+            let facts = (0..self.fact_count)
+                .map(|i| Fact {
+                    kind: FactKind::State,
+                    text: format!("fact number {i}"),
+                })
+                .collect();
+            Ok(DistilledMemory {
+                summary: "summary".to_owned(),
+                facts,
+            })
+        }
+    }
+
+    #[test]
+    fn distill_and_save_caps_excess_facts() {
+        let config = Config {
+            db_path: PathBuf::from(":memory:"),
+            ..Config::default()
+        };
+        let cf = ContextForge::open(config).unwrap();
+
+        let distiller = ManyFactsDistiller {
+            fact_count: crate::distill::MAX_FACTS + 20,
+        };
+
+        let ids = cf
+            .distill_and_save("transcript", &distiller, &SaveOptions::default())
+            .unwrap();
+
+        // Summary ID first, then one ID per capped fact.
+        assert_eq!(ids.len(), 1 + crate::distill::MAX_FACTS);
+        assert_eq!(cf.count().unwrap(), 1 + crate::distill::MAX_FACTS);
     }
 }
