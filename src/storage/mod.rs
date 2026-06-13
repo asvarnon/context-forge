@@ -39,8 +39,13 @@ impl CustomizeConnection<rusqlite::Connection, rusqlite::Error> for PragmaCustom
         &self,
         conn: &mut rusqlite::Connection,
     ) -> std::result::Result<(), rusqlite::Error> {
+        // busy_timeout must be set before journal_mode=WAL: switching to WAL
+        // briefly takes an exclusive lock, and on a fresh database with
+        // multiple connections racing the switch, an un-armed busy_timeout
+        // means that lock contention fails immediately with SQLITE_BUSY
+        // instead of waiting.
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
+            "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
         )?;
         Ok(())
     }
@@ -807,5 +812,41 @@ mod tests {
 
         let results_all = searcher.search(MATCH_ALL_QUERY, None, 10).unwrap();
         assert_eq!(results_all.len(), 2);
+    }
+
+    #[test]
+    fn search_with_fts5_operator_characters_does_not_error() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
+        storage
+            .save(&make_entry("e1", "marco polo", 100, kind::MANUAL))
+            .unwrap();
+
+        // Production bug: a query containing `"` and `.` previously caused
+        // `fts5: syntax error`. It must now succeed and find the entry.
+        let results = searcher.search(r#"if I say "marco"."#, None, 10).unwrap();
+
+        assert!(
+            results.iter().any(|r| r.entry.id == "e1"),
+            "expected 'marco polo' entry to be found despite FTS5 operator characters in the query"
+        );
+    }
+
+    #[test]
+    fn search_or_joins_terms_for_message_length_queries() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
+        storage
+            .save(&make_entry("e1", "alpha one", 100, kind::MANUAL))
+            .unwrap();
+        storage
+            .save(&make_entry("e2", "beta two", 200, kind::MANUAL))
+            .unwrap();
+
+        // Under implicit AND, no entry contains all of "alpha", "beta", and
+        // "gamma", so this would return zero results. OR-join must return both.
+        let results = searcher.search("alpha beta gamma", None, 10).unwrap();
+
+        let ids: Vec<&str> = results.iter().map(|r| r.entry.id.as_str()).collect();
+        assert!(ids.contains(&"e1"), "expected 'alpha one' entry in results");
+        assert!(ids.contains(&"e2"), "expected 'beta two' entry in results");
     }
 }

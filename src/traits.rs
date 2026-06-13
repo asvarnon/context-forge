@@ -77,6 +77,17 @@ pub trait Searcher: Send + Sync {
     /// `scope = None` searches every entry regardless of scope (global recall).
     /// `scope = Some(s)` restricts results to entries whose `scope` equals `s`.
     ///
+    /// `query` is treated as natural-language text: implementations should
+    /// split it into terms and OR-match them (e.g. via FTS5 bm25 ranking)
+    /// rather than requiring every term to match. Query-language operator
+    /// syntax (`AND`, `OR`, `NEAR`, prefix `*`, quoted phrases, column
+    /// filters, etc.) must **not** be interpreted from `query` — operator
+    /// characters are treated as term separators, so arbitrary text never
+    /// produces a syntax error. A query with no usable terms (empty or
+    /// punctuation-only) returns an empty result set, not an error. The
+    /// special value [`crate::engine::MATCH_ALL_QUERY`] (`"*"`) matches every
+    /// entry.
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying search fails.

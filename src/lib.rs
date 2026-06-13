@@ -237,6 +237,15 @@ impl ContextForge {
     /// recall). `scope = Some(s)` restricts the search to entries whose
     /// `scope` equals `s`.
     ///
+    /// `query` is treated as natural-language text: it is split into
+    /// alphanumeric terms which are OR-matched and ranked by bm25 relevance.
+    /// FTS5 operator syntax (`AND`, `OR`, `NEAR`, prefix `*`, quoted phrases,
+    /// column filters, etc.) is **not** interpreted — operator characters are
+    /// treated as term separators, so arbitrary user text never produces a
+    /// query syntax error. A query with no alphanumeric terms (empty or
+    /// punctuation-only) returns an empty result set rather than an error.
+    /// The special value [`MATCH_ALL_QUERY`] (`"*"`) matches every entry.
+    ///
     /// # Errors
     ///
     /// Returns an error if the search or recency-weighting step fails.
