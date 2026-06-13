@@ -53,11 +53,38 @@ impl SqliteSearcher {
     }
 }
 
+/// Convert an arbitrary natural-language string into a safe FTS5 `MATCH`
+/// expression.
+///
+/// Splits `query` on any character that is not Unicode-alphanumeric,
+/// drops empty fragments, double-quotes each remaining term (escaping any
+/// internal `"` as `""`), and joins the terms with `" OR "`. Quoting
+/// ensures FTS5 operator characters in the input (`.`, `"`, `*`, `:`, `-`,
+/// etc.) are never interpreted as query syntax. Returns `None` when `query`
+/// contains no alphanumeric terms (e.g. empty or punctuation-only input).
+fn to_fts5_match(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect();
+
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
 impl Searcher for SqliteSearcher {
     fn search(&self, query: &str, scope: Option<&str>, limit: usize) -> Result<Vec<ScoredEntry>> {
         if query == MATCH_ALL_QUERY {
             return self.search_all(scope, limit);
         }
+
+        let Some(match_expr) = to_fts5_match(query) else {
+            return Ok(Vec::new());
+        };
 
         let conn = self.pool.get()?;
 
@@ -73,7 +100,7 @@ impl Searcher for SqliteSearcher {
 
         let results = stmt
             .query_map(
-                rusqlite::params![query, scope, i64::try_from(limit).unwrap_or(i64::MAX)],
+                rusqlite::params![match_expr, scope, i64::try_from(limit).unwrap_or(i64::MAX)],
                 |row| {
                     let entry = row_to_entry(row)?;
                     let raw_score: f64 = row.get("score")?;
@@ -88,5 +115,45 @@ impl Searcher for SqliteSearcher {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_fts5_match;
+
+    #[test]
+    fn single_term() {
+        assert_eq!(to_fts5_match("marco"), Some("\"marco\"".to_owned()));
+    }
+
+    #[test]
+    fn multi_word_with_punctuation() {
+        let input = r#"if I say "marco" you say "polo"."#;
+        let expected = "\"if\" OR \"I\" OR \"say\" OR \"marco\" OR \"you\" OR \"say\" OR \"polo\"";
+        assert_eq!(to_fts5_match(input), Some(expected.to_owned()));
+    }
+
+    #[test]
+    fn punctuation_only_returns_none() {
+        assert_eq!(to_fts5_match("...:-*"), None);
+    }
+
+    #[test]
+    fn empty_returns_none() {
+        assert_eq!(to_fts5_match(""), None);
+    }
+
+    #[test]
+    fn hyphen_and_colon_split_terms() {
+        assert_eq!(
+            to_fts5_match("well-known scope:test"),
+            Some("\"well\" OR \"known\" OR \"scope\" OR \"test\"".to_owned())
+        );
+    }
+
+    #[test]
+    fn unicode_term_survives_as_single_term() {
+        assert_eq!(to_fts5_match("café"), Some("\"café\"".to_owned()));
     }
 }
