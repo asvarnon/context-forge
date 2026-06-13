@@ -9,25 +9,25 @@ searchable memory across sessions.
 
 ## Installation
 
-> **Pre-release notice:** `0.5.0-beta.1` is a pre-release. The public API may
+> **Pre-release notice:** `0.5.0-beta.3` is a pre-release. The public API may
 > still change between betas based on integration feedback. Pin the **exact**
-> version — caret ranges (`^0.5.0-beta.1`, or the bare `"0.5.0-beta.1"` Cargo
+> version — caret ranges (`^0.5.0-beta.3`, or the bare `"0.5.0-beta.3"` Cargo
 > writes by default) never match pre-release versions across betas, so an
 > exact pin is required either way:
 >
 > ```toml
-> context-forge = "=0.5.0-beta.1"
+> context-forge = "=0.5.0-beta.3"
 > ```
 
 ```sh
-cargo add context-forge@0.5.0-beta.1
+cargo add context-forge@0.5.0-beta.3
 ```
 
 or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-context-forge = "=0.5.0-beta.1"
+context-forge = "=0.5.0-beta.3"
 ```
 
 ## Quick start
@@ -75,8 +75,8 @@ durable storage.
 
 | Feature | Default | Pulls in | Status |
 |---|---|---|---|
-| `analysis` | yes | `stop-words` | Importance-detection pipeline (tokenizer, lexicon, scoring). Used internally for future ranking work. |
-| `parallel` | no | `rayon` | Reserved for Phase 4 (parallel scoring). Not yet implemented. |
+| `analysis` | yes | `stop-words` | Importance-detection pipeline — tokenizer, lexicon, n-grams, recurrence, classification, scoring. |
+| `parallel` | no | `rayon` | Opt-in rayon parallelism for the `analysis` pipeline (per-session term maps, classification, scoring). The library never configures the global rayon pool. |
 | `distill-http` | no | `reqwest` | OpenAI-compatible local-LLM distillation (Ollama/llama-server). |
 
 ## Async callers
@@ -166,13 +166,14 @@ Entries carry a `scope` field (e.g. `"discord:thread:42"`,
 
 ## Status
 
-This crate is mid-refactor from a Claude Code compaction-memory plugin into a
-general-purpose library. Phases 0–5 are complete: single-crate layout, data
-model generalization, public API facade, save-time secret scrubbing,
-`parallel` (rayon-based parallel scoring), and `distill-http` (local-LLM
-thread distillation via an OpenAI-compatible endpoint).
+Reworked from a Claude Code compaction-memory plugin into a general-purpose
+library. All features are implemented and tested: single-crate layout, scoped
+data model, the `ContextForge` public API facade, save-time secret scrubbing,
+optional rayon parallelism (`parallel`), and local-LLM thread distillation via
+an OpenAI-compatible endpoint (`distill-http`).
 
-Published as **`0.5.0-beta.1`** — a pre-release for downstream integration
-testing. Final `0.5.0` will follow once the API has proven itself in a real
-downstream consumer; any breaking changes that integration surfaces will land
-as additional betas (`0.5.0-beta.2`, ...) before the `0.5.0` cut.
+Published as a **`0.5.0-beta`** pre-release while the API proves itself in a
+real downstream consumer. Because it is a pre-release, depend on it with an
+exact pin (`context-forge = "=0.5.0-beta.3"`) — Cargo's default version ranges
+never match pre-release versions. Any breaking changes that integration
+surfaces land as further betas before the final `0.5.0` cut.
