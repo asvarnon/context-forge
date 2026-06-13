@@ -2,10 +2,15 @@
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Lexicons {
+    /// Words/phrases indicating negation or contradiction (e.g. "not", "no longer").
     pub negation_markers: Vec<String>,
+    /// Words/phrases indicating comparison (e.g. "instead of", "rather than").
     pub comparison_markers: Vec<String>,
+    /// Words/phrases indicating causal reasoning (e.g. "because", "so that").
     pub causal_connectors: Vec<String>,
+    /// Words/phrases indicating confirmation (e.g. "confirmed", "agreed").
     pub confirmation_tokens: Vec<String>,
+    /// Words/phrases indicating a state-change operation (e.g. "is now", "set to").
     pub state_operators: Vec<String>,
 }
 

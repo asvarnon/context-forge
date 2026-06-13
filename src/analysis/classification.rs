@@ -42,22 +42,35 @@ pub struct PassageContext {
     pub timestamp: i64,
 }
 
+/// A category of importance assigned to a passage during classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ImportanceCategory {
+    /// The passage corrects or contradicts earlier information.
     Corrective,
+    /// The passage records a state change (entity is now value).
     Stateful,
+    /// The passage records a decision and its rationale.
     Decisive,
+    /// The passage repeats or reinforces a recurring topic.
     Reinforcing,
 }
 
+/// A passage that has been classified into zero or more
+/// [`ImportanceCategory`] values, with extracted entities/values where
+/// applicable.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ClassifiedPassage {
+    /// The passage text.
     pub text: String,
+    /// Categories assigned to this passage.
     pub categories: Vec<ImportanceCategory>,
+    /// High-recurrence terms that triggered extraction of this passage.
     pub triggering_terms: Vec<String>,
+    /// Session ID this passage belongs to.
     pub session_id: String,
+    /// Source entry timestamp (Unix seconds).
     pub timestamp: i64,
     /// Extracted entity for stateful/decisive categories.
     pub entity: Option<String>,

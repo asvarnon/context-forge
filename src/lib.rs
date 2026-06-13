@@ -69,17 +69,29 @@
 //! Note that [`SaveOptions::metadata`] is **not** scrubbed (see its docs).
 
 #![warn(clippy::pedantic)]
+#![warn(missing_docs)]
 
+/// Engine and scrub configuration types (`Config`, `EvictionPolicy`, `ScrubConfig`).
 pub mod config;
+/// Local-LLM distillation trait and the optional `distill-http` implementation.
 pub mod distill;
+/// `ContextEngine`: search, recency decay, and token-budget assembly.
 pub mod engine;
+/// `ContextEntry`, `ScoredEntry`, and the `kind` constants module.
 pub mod entry;
+/// The crate's `Error` type.
 pub mod error;
+/// Save-time secret scrubbing (`scrub_secrets`, `ScrubConfig`).
 pub mod scrub;
+/// Session grouping helpers (`group_entries_by_session`, `SessionGroup`).
 pub mod session;
+/// SQLite-backed storage and search implementations. All SQL lives here.
 pub mod storage;
+/// `ContextStorage` and `Searcher` traits, and the crate's `Result` alias.
 pub mod traits;
 
+/// Importance-detection pipeline (tokenizer, lexicon, scoring). Pure
+/// computation, no I/O. Enabled by the `analysis` feature (default).
 #[cfg(feature = "analysis")]
 pub mod analysis;
 

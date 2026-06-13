@@ -5,8 +5,8 @@
 //! that callers can implement their own distillers — for example, a remote
 //! API client, a different local model runtime, or a test stub.
 //!
-//! The [`OpenAiCompatDistiller`](openai_compat::OpenAiCompatDistiller)
-//! implementation (behind the `distill-http` feature) talks to an
+//! The `OpenAiCompatDistiller` implementation in the `openai_compat`
+//! submodule (behind the `distill-http` feature) talks to an
 //! OpenAI-compatible chat completions endpoint such as Ollama or
 //! llama-server. It is the only place in this crate that performs HTTP, and
 //! only when that feature is enabled.
