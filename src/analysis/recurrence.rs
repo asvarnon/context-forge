@@ -267,23 +267,23 @@ mod tests {
     #[test]
     fn compute_recurrence_blocklisted_ngram_does_not_suppress_unigrams() {
         let sessions = vec![
-            term_map(&["home", "ausvar", "home ausvar"]),
-            term_map(&["home", "ausvar", "home ausvar"]),
-            term_map(&["home", "ausvar"]),
-            term_map(&["home", "ausvar"]),
+            term_map(&["home", "devuser", "home devuser"]),
+            term_map(&["home", "devuser", "home devuser"]),
+            term_map(&["home", "devuser"]),
+            term_map(&["home", "devuser"]),
             term_map(&["home"]),
         ];
 
         let config = RecurrenceConfig {
             min_session_frequency: 1,
             max_session_ratio: 1.0,
-            term_blocklist: HashSet::from(["home ausvar".to_string()]),
+            term_blocklist: HashSet::from(["home devuser".to_string()]),
         };
 
         let results = compute_recurrence(&sessions, &config);
         assert!(results.iter().any(|result| result.term == "home"));
-        assert!(results.iter().any(|result| result.term == "ausvar"));
-        assert!(results.iter().all(|result| result.term != "home ausvar"));
+        assert!(results.iter().any(|result| result.term == "devuser"));
+        assert!(results.iter().all(|result| result.term != "home devuser"));
     }
 
     #[test]

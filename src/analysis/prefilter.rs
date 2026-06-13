@@ -334,7 +334,7 @@ go ahead and tell me the most relevent context from the last session
 
 [assistant]
 [tool_use: Read]
-{"file_path":"/home/ausvar/.claude/projects/-home-ausvar/6b3c074f/hook-c1ddfa0d-stdout.txt"}
+{"file_path":"/home/devuser/.claude/projects/-home-devuser/6b3c074f/hook-c1ddfa0d-stdout.txt"}
 
 [user]
 [tool_result]
@@ -358,7 +358,7 @@ Here's what matters from the last session (which spanned 3 compaction cycles):
 
         assert!(!filtered.contains("[tool_use: Read]"));
         assert!(!filtered.contains("[tool_result]"));
-        assert!(!filtered.contains("/home/ausvar"));
+        assert!(!filtered.contains("/home/devuser"));
         assert!(!filtered.contains("[assistant]"));
         assert!(!filtered.contains("[user]"));
     }
@@ -427,7 +427,7 @@ Keep this line.
     #[test]
     fn strips_paths_within_preserved_lines() {
         let content =
-            "See /home/ausvar/dev/Projects/context-forge/README.md and crates/analysis/src/lib.rs and C:\\Users\\dev\\notes.txt now.";
+            "See /home/devuser/dev/Projects/context-forge/README.md and crates/analysis/src/lib.rs and C:\\Users\\dev\\notes.txt now.";
 
         let filtered = strip_execution_artifacts(content, &PrefilterConfig::default());
 
@@ -436,7 +436,7 @@ Keep this line.
 
     #[test]
     fn honors_category_toggles() {
-        let content = "[tool_use: Read]\n{\"file_path\":\"/home/ausvar/a.txt\"}\n[tool_result]";
+        let content = "[tool_use: Read]\n{\"file_path\":\"/home/devuser/a.txt\"}\n[tool_result]";
 
         let config = PrefilterConfig {
             tool_call_blocks: FilterToggle::Disabled,
@@ -450,6 +450,6 @@ Keep this line.
 
         assert!(filtered.contains("[tool_use: Read]"));
         assert!(filtered.contains("[tool_result]"));
-        assert!(filtered.contains("/home/ausvar/a.txt"));
+        assert!(filtered.contains("/home/devuser/a.txt"));
     }
 }
