@@ -7,6 +7,29 @@ assembly — no network calls, no async runtime, no cloud dependency.
 Embed it in a bot, agent runtime, or MCP server that needs durable,
 searchable memory across sessions.
 
+## Installation
+
+> **Pre-release notice:** `0.5.0-beta.1` is a pre-release. The public API may
+> still change between betas based on integration feedback. Pin the **exact**
+> version — caret ranges (`^0.5.0-beta.1`, or the bare `"0.5.0-beta.1"` Cargo
+> writes by default) never match pre-release versions across betas, so an
+> exact pin is required either way:
+>
+> ```toml
+> context-forge = "=0.5.0-beta.1"
+> ```
+
+```sh
+cargo add context-forge@0.5.0-beta.1
+```
+
+or in `Cargo.toml`:
+
+```toml
+[dependencies]
+context-forge = "=0.5.0-beta.1"
+```
+
 ## Quick start
 
 ```rust
@@ -54,7 +77,7 @@ durable storage.
 |---|---|---|---|
 | `analysis` | yes | `stop-words` | Importance-detection pipeline (tokenizer, lexicon, scoring). Used internally for future ranking work. |
 | `parallel` | no | `rayon` | Reserved for Phase 4 (parallel scoring). Not yet implemented. |
-| `distill-http` | no | `reqwest` | Reserved for Phase 5 (local-LLM summarization via an OpenAI-compatible endpoint). Not yet implemented. |
+| `distill-http` | no | `reqwest` | OpenAI-compatible local-LLM distillation (Ollama/llama-server). |
 
 ## Async callers
 
@@ -144,14 +167,12 @@ Entries carry a `scope` field (e.g. `"discord:thread:42"`,
 ## Status
 
 This crate is mid-refactor from a Claude Code compaction-memory plugin into a
-general-purpose library. Phases 0–3 are complete: single-crate layout, data
-model generalization, public API facade, and save-time secret scrubbing.
-Planned:
+general-purpose library. Phases 0–5 are complete: single-crate layout, data
+model generalization, public API facade, save-time secret scrubbing,
+`parallel` (rayon-based parallel scoring), and `distill-http` (local-LLM
+thread distillation via an OpenAI-compatible endpoint).
 
-- Phase 4 — `parallel` (rayon-based parallel scoring).
-- Phase 5 — `distill-http` (local-LLM thread distillation via an
-  OpenAI-compatible endpoint).
-- Phase 6 — integration into downstream consumers (homelab-rs).
-- Phase 7 — crates.io publish metadata and release process.
-
-Not yet published to crates.io.
+Published as **`0.5.0-beta.1`** — a pre-release for downstream integration
+testing. Final `0.5.0` will follow once the API has proven itself in a real
+downstream consumer; any breaking changes that integration surfaces will land
+as additional betas (`0.5.0-beta.2`, ...) before the `0.5.0` cut.

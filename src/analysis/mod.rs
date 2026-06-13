@@ -9,15 +9,25 @@ use std::collections::HashMap;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// Importance classification of passages into categories.
 pub mod classification;
+/// Extraction of importance segments from scored passages.
 pub mod extraction;
+/// Term frequency and session term-map construction.
 pub mod frequency;
+/// Detection of prompt-injection-shaped content.
 pub mod injection;
+/// Lexicon configuration for importance scoring.
 pub mod lexicon;
+/// N-gram extraction over token sequences.
 pub mod ngrams;
+/// Pre-filtering of passages before classification.
 pub mod prefilter;
+/// Cross-session recurrence scoring.
 pub mod recurrence;
+/// Importance scoring of classified passages.
 pub mod scoring;
+/// Text tokenization and stopword filtering.
 pub mod tokenizer;
 
 // Re-export public API

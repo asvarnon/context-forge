@@ -9,7 +9,9 @@ use crate::entry::ContextEntry;
 use crate::storage::schema::{migrate, row_to_entry};
 use crate::traits::ContextStorage;
 
+/// Forward-only schema migrations and row-to-entry conversion.
 pub mod schema;
+/// FTS5-backed `Searcher` implementation.
 pub mod searcher;
 
 pub use searcher::SqliteSearcher;
