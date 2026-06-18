@@ -974,4 +974,36 @@ mod tests {
             None,
         );
     }
+
+    /// Wire-level proof companion to
+    /// `request_body_is_openai_portable_struct_level`: runs a real `distill()`
+    /// call against the mock server and checks the bytes that actually went
+    /// over the wire, not just a struct built by hand in the test.
+    #[test]
+    fn request_body_is_openai_portable_wire_level() {
+        let body = json!({
+            "summary": "x",
+            "facts": []
+        })
+        .to_string();
+        let envelope = json!({
+            "choices": [
+                {"message": {"content": body}}
+            ]
+        })
+        .to_string();
+
+        let (url, rx) = spawn_mock_server(vec![MockResponse {
+            status_line: "HTTP/1.1 200 OK",
+            body: envelope,
+        }]);
+
+        let distiller = distiller_for(&url);
+        distiller.distill("hello transcript").expect("distill ok");
+
+        let request_body = rx.recv().expect("captured request");
+        let parsed: Value =
+            serde_json::from_str(&request_body).expect("request body is valid JSON");
+        assert_openai_portable(&parsed, Some(SchemaStyle::OpenAi));
+    }
 }
