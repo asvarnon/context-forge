@@ -14,6 +14,8 @@
 #[cfg(feature = "distill-http")]
 pub mod openai_compat;
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::traits::Result;
@@ -38,7 +40,7 @@ pub struct Fact {
 }
 
 /// The category of a distilled [`Fact`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum FactKind {
@@ -95,6 +97,45 @@ pub(crate) fn cap_distilled_memory(memory: DistilledMemory) -> DistilledMemory {
     DistilledMemory { summary, facts }
 }
 
+/// Reduces several [`DistilledMemory`] partial results — one per transcript
+/// chunk — into a single [`DistilledMemory`].
+///
+/// Facts are concatenated in input order and deduplicated on
+/// `(kind, normalized text)`, where normalization trims whitespace and
+/// lowercases; the first occurrence of each duplicate is kept. Summaries are
+/// joined with a blank line between them. The combined result is passed
+/// through [`cap_distilled_memory`], so the output is bounded the same way a
+/// single distillation's output would be.
+///
+/// This is the pure, deterministic reduce: no model call, safe to call with
+/// an empty `Vec` (returns an empty [`DistilledMemory`]) or a single-element
+/// `Vec` (returns that element's content, capped).
+#[must_use]
+pub fn merge_distilled(parts: Vec<DistilledMemory>) -> DistilledMemory {
+    let mut summaries = Vec::with_capacity(parts.len());
+    let mut facts = Vec::new();
+    let mut seen = HashSet::new();
+
+    for part in parts {
+        if !part.summary.is_empty() {
+            summaries.push(part.summary);
+        }
+        for fact in part.facts {
+            let key = (fact.kind, fact.text.trim().to_lowercase());
+            if seen.insert(key) {
+                // "insert into the seen-set, and only
+                //keep this fact if that insert was new." One line does both the membership check and the recording
+                facts.push(fact);
+            }
+        }
+    }
+
+    cap_distilled_memory(DistilledMemory {
+        summary: summaries.join("\n\n"),
+        facts,
+    })
+}
+
 /// Produces [`DistilledMemory`] from a raw conversation transcript.
 ///
 /// Implementations must be thread-safe (`Send + Sync`) so a single
@@ -122,8 +163,8 @@ pub trait Distiller: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_distilled_memory, DistilledMemory, Fact, FactKind, MAX_FACTS, MAX_FACT_CHARS,
-        MAX_SUMMARY_CHARS,
+        cap_distilled_memory, merge_distilled, DistilledMemory, Fact, FactKind, MAX_FACTS,
+        MAX_FACT_CHARS, MAX_SUMMARY_CHARS,
     };
 
     fn fact(text: impl Into<String>) -> Fact {
@@ -202,5 +243,121 @@ mod tests {
         assert_eq!(capped.summary, memory.summary);
         assert_eq!(capped.facts.len(), memory.facts.len());
         assert_eq!(capped.facts[0].text, memory.facts[0].text);
+    }
+
+    #[test]
+    fn merge_empty_input_returns_empty_memory() {
+        let merged = merge_distilled(vec![]);
+
+        assert_eq!(merged.summary, "");
+        assert!(merged.facts.is_empty());
+    }
+
+    #[test]
+    fn merge_single_part_is_passthrough() {
+        let part = DistilledMemory {
+            summary: "A short summary.".to_owned(),
+            facts: vec![fact("A short fact.")],
+        };
+
+        let merged = merge_distilled(vec![part.clone()]);
+
+        assert_eq!(merged.summary, part.summary);
+        assert_eq!(merged.facts.len(), 1);
+        assert_eq!(merged.facts[0].text, part.facts[0].text);
+    }
+
+    #[test]
+    fn merge_concatenates_facts_from_multiple_parts_in_order() {
+        let part1 = DistilledMemory {
+            summary: "First.".to_owned(),
+            facts: vec![fact("Fact A")],
+        };
+        let part2 = DistilledMemory {
+            summary: "Second.".to_owned(),
+            facts: vec![fact("Fact B")],
+        };
+
+        let merged = merge_distilled(vec![part1, part2]);
+
+        assert_eq!(merged.facts.len(), 2);
+        assert_eq!(merged.facts[0].text, "Fact A");
+        assert_eq!(merged.facts[1].text, "Fact B");
+    }
+
+    #[test]
+    fn merge_dedups_facts_with_same_kind_and_normalized_text() {
+        let part1 = DistilledMemory {
+            summary: "First.".to_owned(),
+            facts: vec![fact("We decided to roll back the deploy.")],
+        };
+        let part2 = DistilledMemory {
+            summary: "Second.".to_owned(),
+            // Same fact, different case and trailing whitespace.
+            facts: vec![fact("we decided to roll back the deploy.  ")],
+        };
+
+        let merged = merge_distilled(vec![part1, part2]);
+
+        // Only the first occurrence survives, with its original text intact.
+        assert_eq!(merged.facts.len(), 1);
+        assert_eq!(merged.facts[0].text, "We decided to roll back the deploy.");
+    }
+
+    #[test]
+    fn merge_does_not_dedup_same_text_across_different_kinds() {
+        let part = DistilledMemory {
+            summary: "summary".to_owned(),
+            facts: vec![
+                Fact {
+                    kind: FactKind::Decision,
+                    text: "Same text.".to_owned(),
+                },
+                Fact {
+                    kind: FactKind::State,
+                    text: "Same text.".to_owned(),
+                },
+            ],
+        };
+
+        let merged = merge_distilled(vec![part]);
+
+        // Different kind means a different dedup key, even with identical text.
+        assert_eq!(merged.facts.len(), 2);
+    }
+
+    #[test]
+    fn merge_joins_summaries_with_blank_line_then_caps() {
+        // Exactly at the cap already, so nothing from the second summary
+        // should survive truncation.
+        let summary_a = "a".repeat(MAX_SUMMARY_CHARS);
+        let summary_b = "b".repeat(1_000);
+        let part1 = DistilledMemory {
+            summary: summary_a.clone(),
+            facts: vec![],
+        };
+        let part2 = DistilledMemory {
+            summary: summary_b,
+            facts: vec![],
+        };
+
+        let merged = merge_distilled(vec![part1, part2]);
+
+        assert_eq!(merged.summary, summary_a);
+        assert_eq!(merged.summary.chars().count(), MAX_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn merge_caps_total_facts_at_max_facts() {
+        let parts: Vec<DistilledMemory> = (0..MAX_FACTS + 20)
+            .map(|i| DistilledMemory {
+                summary: String::new(),
+                facts: vec![fact(format!("fact number {i}"))],
+            })
+            .collect();
+
+        let merged = merge_distilled(parts);
+
+        assert_eq!(merged.facts.len(), MAX_FACTS);
     }
 }

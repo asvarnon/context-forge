@@ -135,6 +135,16 @@ fn strip_code_fences(content: &str) -> &str {
 }
 
 /// `OpenAI` chat completion request body.
+///
+/// # Portability invariant
+///
+/// This body must remain portable across OpenAI-compatible servers (Ollama,
+/// llama-server, vLLM, …). Any vendor-specific field is a deliberate,
+/// documented deviation covered by the OpenAI-compat conformance tests
+/// (`request_body_is_openai_portable_struct_level` and
+/// `_wire_level` in this module's `tests`). Do not add a field here, or to
+/// [`response_format_payload`], without updating those tests and their
+/// allowlist/denylist.
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
@@ -768,12 +778,12 @@ mod tests {
     // a request body that is portable across OpenAI-compatible servers. Vendor
     // deviations must be intentional and accounted for here, not accidental.
 
-    /// Standard OpenAI Chat Completions top-level request fields. Every
+    /// Standard `OpenAI` Chat Completions top-level request fields. Every
     /// top-level key the distiller emits must be in this set.
     ///
     /// `top_k` is deliberately absent: it is widely accepted by
-    /// OpenAI-compatible servers but is not part of the official OpenAI spec,
-    /// so its appearance should trip this test and force a conscious
+    /// OpenAI-compatible servers but is not part of the official `OpenAI`
+    /// spec, so its appearance should trip this test and force a conscious
     /// portability decision.
     const ALLOWED_TOP_LEVEL_KEYS: &[&str] = &[
         "model",
