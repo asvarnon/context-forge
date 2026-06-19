@@ -136,6 +136,95 @@ pub fn merge_distilled(parts: Vec<DistilledMemory>) -> DistilledMemory {
     })
 }
 
+/// Splits `transcript` into chunks that each fit within `max_chars`.
+///
+/// Packing is line-aware: each chunk is filled with whole lines (a
+/// transcript is one line per turn) up to `max_chars`, so a chunk only ever
+/// cuts between turns, never mid-turn. A single line longer than
+/// `max_chars` on its own is hard-split on `char` boundaries into one or
+/// more chunks — this function is a strict size guarantee, not a hint, so
+/// even a pathologically long line cannot produce an over-budget chunk.
+///
+/// `max_chars == 0` has no valid split (every chunk would have to be
+/// empty), so it clamps to a single chunk containing the whole
+/// `transcript` — the same behavior the crate had before chunking existed.
+/// Debug builds panic via `debug_assert_ne!` so a misconfigured budget is
+/// caught during development; release builds degrade silently, matching
+/// [`cap_distilled_memory`]'s convention of never panicking on
+/// untrusted/misconfigured input.
+///
+/// An empty `transcript` returns an empty `Vec` (zero chunks).
+///
+/// This is a pure, zero-copy split: the returned slices borrow from
+/// `transcript`, and concatenating them in order reproduces `transcript`
+/// exactly — no data is dropped, added, or copied.
+#[must_use]
+pub fn split_on_budget(transcript: &str, max_chars: usize) -> Vec<&str> {
+    if transcript.is_empty() {
+        return Vec::new();
+    }
+
+    if max_chars == 0 {
+        debug_assert_ne!(
+            max_chars, 0,
+            "split_on_budget called with max_chars == 0; clamping to a single, unsplit chunk"
+        );
+        return vec![transcript];
+    }
+
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0usize;
+    let mut consumed = 0usize;
+    let mut chunk_chars = 0usize;
+
+    for line in transcript.split_inclusive('\n') {
+        let line_chars = line.chars().count();
+
+        if line_chars > max_chars {
+            if consumed > chunk_start {
+                chunks.push(&transcript[chunk_start..consumed]);
+            }
+            chunks.extend(hard_split(line, max_chars));
+            consumed += line.len();
+            chunk_start = consumed;
+            chunk_chars = 0;
+            continue;
+        }
+
+        if chunk_chars + line_chars > max_chars && consumed > chunk_start {
+            chunks.push(&transcript[chunk_start..consumed]);
+            chunk_start = consumed;
+            chunk_chars = 0;
+        }
+
+        consumed += line.len();
+        chunk_chars += line_chars;
+    }
+
+    if consumed > chunk_start {
+        chunks.push(&transcript[chunk_start..consumed]);
+    }
+
+    chunks
+}
+
+/// Hard-splits `line` into pieces of at most `max_chars` Unicode scalar
+/// values each, on `char` boundaries. Used by [`split_on_budget`] when a
+/// single line exceeds the chunk budget on its own.
+fn hard_split(mut line: &str, max_chars: usize) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    while !line.is_empty() {
+        if let Some((byte_idx, _)) = line.char_indices().nth(max_chars) {
+            pieces.push(&line[..byte_idx]);
+            line = &line[byte_idx..];
+        } else {
+            pieces.push(line);
+            break;
+        }
+    }
+    pieces
+}
+
 /// Produces [`DistilledMemory`] from a raw conversation transcript.
 ///
 /// Implementations must be thread-safe (`Send + Sync`) so a single
@@ -163,8 +252,8 @@ pub trait Distiller: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_distilled_memory, merge_distilled, DistilledMemory, Fact, FactKind, MAX_FACTS,
-        MAX_FACT_CHARS, MAX_SUMMARY_CHARS,
+        cap_distilled_memory, merge_distilled, split_on_budget, DistilledMemory, Fact, FactKind,
+        MAX_FACTS, MAX_FACT_CHARS, MAX_SUMMARY_CHARS,
     };
 
     fn fact(text: impl Into<String>) -> Fact {
@@ -359,5 +448,66 @@ mod tests {
         let merged = merge_distilled(parts);
 
         assert_eq!(merged.facts.len(), MAX_FACTS);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_chars == 0")]
+    fn split_on_budget_panics_in_debug_on_zero_budget() {
+        let _ = split_on_budget("a\nb\n", 0);
+    }
+
+    #[test]
+    fn split_on_budget_empty_transcript_returns_no_chunks() {
+        let chunks = split_on_budget("", 60);
+
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn split_on_budget_packs_lines_into_one_chunk_when_they_fit() {
+        let transcript = "ab\ncde\nfg\n";
+        let chunks = split_on_budget(transcript, 12);
+
+        assert_eq!(chunks, vec!["ab\ncde\nfg\n"]);
+        assert_eq!(chunks.concat(), transcript);
+    }
+
+    #[test]
+    fn split_on_budget_flushes_before_exceeding_budget() {
+        let transcript = "ab\ncdefghij\nklm\n";
+        let chunks = split_on_budget(transcript, 10);
+
+        assert_eq!(chunks, vec!["ab\n", "cdefghij\n", "klm\n"]);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 10));
+        assert_eq!(chunks.concat(), transcript);
+    }
+
+    #[test]
+    fn split_on_budget_hard_splits_oversized_single_line() {
+        let transcript = "abcdefghij\n";
+        let chunks = split_on_budget(transcript, 5);
+
+        assert_eq!(chunks, vec!["abcde", "fghij", "\n"]);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 5));
+        assert_eq!(chunks.concat(), transcript);
+    }
+
+    #[test]
+    fn split_on_budget_flushes_pending_chunk_before_hard_splitting_oversized_line() {
+        let transcript = format!("hi\n{}\nok\n", "c".repeat(13));
+        let chunks = split_on_budget(&transcript, 5);
+
+        assert_eq!(chunks, vec!["hi\n", "ccccc", "ccccc", "ccc\n", "ok\n"]);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 5));
+        assert_eq!(chunks.concat(), transcript);
+    }
+
+    #[test]
+    fn split_on_budget_reconstructs_transcript_without_trailing_newline() {
+        let transcript = "a\nbb\nccc";
+        let chunks = split_on_budget(transcript, 100);
+
+        assert_eq!(chunks, vec!["a\nbb\nccc"]);
+        assert_eq!(chunks.concat(), transcript);
     }
 }
