@@ -135,6 +135,16 @@ fn strip_code_fences(content: &str) -> &str {
 }
 
 /// `OpenAI` chat completion request body.
+///
+/// # Portability invariant
+///
+/// This body must remain portable across OpenAI-compatible servers (Ollama,
+/// llama-server, vLLM, …). Any vendor-specific field is a deliberate,
+/// documented deviation covered by the OpenAI-compat conformance tests
+/// (`request_body_is_openai_portable_struct_level` and
+/// `_wire_level` in this module's `tests`). Do not add a field here, or to
+/// [`response_format_payload`], without updating those tests and their
+/// allowlist/denylist.
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
@@ -760,5 +770,250 @@ mod tests {
         // error (timeout) must not trigger the prompt-embedded fallback.
         assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    // ---- OpenAI-compatibility conformance ----
+    //
+    // These tests are a permanent invariant: the distiller must only ever emit
+    // a request body that is portable across OpenAI-compatible servers. Vendor
+    // deviations must be intentional and accounted for here, not accidental.
+
+    /// Standard `OpenAI` Chat Completions top-level request fields. Every
+    /// top-level key the distiller emits must be in this set.
+    ///
+    /// `top_k` is deliberately absent: it is widely accepted by
+    /// OpenAI-compatible servers but is not part of the official `OpenAI`
+    /// spec, so its appearance should trip this test and force a conscious
+    /// portability decision.
+    const ALLOWED_TOP_LEVEL_KEYS: &[&str] = &[
+        "model",
+        "messages",
+        "response_format",
+        "temperature",
+        "top_p",
+        "n",
+        "stop",
+        "max_tokens",
+        "max_completion_tokens",
+        "seed",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "user",
+        "stream",
+        "tools",
+        "tool_choice",
+    ];
+
+    /// Vendor/runtime-native fields that must NEVER appear anywhere in the
+    /// request body — top-level or nested. These are Ollama / llama.cpp knobs
+    /// that are not portable across OpenAI-compatible servers.
+    const FORBIDDEN_VENDOR_KEYS: &[&str] = &[
+        "options",
+        "num_ctx",
+        "num_batch",
+        "keep_alive",
+        "num_predict",
+        "mirostat",
+        "repeat_penalty",
+        "tfs_z",
+        "num_gpu",
+        "main_gpu",
+    ];
+
+    /// Standard keys allowed on a single `messages` entry.
+    const ALLOWED_MESSAGE_KEYS: &[&str] =
+        &["role", "content", "name", "tool_calls", "tool_call_id"];
+
+    /// Recursively asserts that no [`FORBIDDEN_VENDOR_KEYS`] appears as an
+    /// object key anywhere within `value` (covers nested values, not just
+    /// top-level ones).
+    /// pretty much just a check for logs. a failure message
+    fn assert_no_vendor_keys(value: &Value) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    assert!(
+                        !FORBIDDEN_VENDOR_KEYS.contains(&key.as_str()),
+                        "vendor-specific field {key:?} leaked into the request body"
+                    );
+                    assert_no_vendor_keys(child);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(assert_no_vendor_keys),
+            _ => {}
+        }
+    }
+
+    /// Asserts that `body` is an OpenAI-portable chat completion request.
+    ///
+    /// `style` is the `response_format` shape to expect: `Some(..)` when the
+    /// body carries a `response_format`, `None` for the prompt-embedded path
+    /// (which emits no `response_format` key at all).
+    ///
+    /// Enforces the crate's conformance contract: every top-level key is
+    /// standard (subset of [`ALLOWED_TOP_LEVEL_KEYS`]), no vendor field appears
+    /// anywhere, message entries use only standard keys, and the one allowed
+    /// vendor deviation — `LlamaServer`'s `schema` sibling of `json_object` — is
+    /// contained to that style and never leaks into `OpenAi` style.
+    fn assert_openai_portable(body: &Value, style: Option<SchemaStyle>) {
+        let obj = body
+            .as_object()
+            .expect("request body must be a JSON object");
+
+        // (1) Top-level allowlist (subset check).
+        for key in obj.keys() {
+            assert!(
+                ALLOWED_TOP_LEVEL_KEYS.contains(&key.as_str()),
+                "non-standard top-level request key {key:?} (not in the OpenAI allowlist)"
+            );
+        }
+
+        // (2) Vendor denylist, recursively.
+        assert_no_vendor_keys(body);
+
+        // (3) messages entries use only standard keys.
+        let messages = obj
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("request body must have a messages array");
+        for message in messages {
+            let msg_obj = message.as_object().expect("each message must be an object");
+            for key in msg_obj.keys() {
+                assert!(
+                    ALLOWED_MESSAGE_KEYS.contains(&key.as_str()),
+                    "non-standard message key {key:?}"
+                );
+            }
+        }
+
+        // (4) response_format shape, per SchemaStyle.
+        match style {
+            None => assert!(
+                !obj.contains_key("response_format"),
+                "prompt-embedded path must not emit a response_format"
+            ),
+            Some(SchemaStyle::OpenAi) => {
+                let rf = obj
+                    .get("response_format")
+                    .and_then(Value::as_object)
+                    .expect("OpenAi style must emit a response_format object");
+                assert_eq!(
+                    rf.get("type").and_then(Value::as_str),
+                    Some("json_schema"),
+                    "OpenAi response_format type must be json_schema"
+                );
+                assert!(
+                    rf.contains_key("json_schema"),
+                    "OpenAi style must nest the schema under json_schema"
+                );
+                // The bare `schema` sibling is the llama.cpp extension; it must
+                // not leak into the strictly-portable OpenAi style.
+                assert!(
+                    !rf.contains_key("schema"),
+                    "bare `schema` on response_format is a llama.cpp extension \
+                     and must not appear in OpenAi (strictly portable) style"
+                );
+            }
+            Some(SchemaStyle::LlamaServer) => {
+                let rf = obj
+                    .get("response_format")
+                    .and_then(Value::as_object)
+                    .expect("LlamaServer style must emit a response_format object");
+                assert_eq!(
+                    rf.get("type").and_then(Value::as_str),
+                    Some("json_object"),
+                    "LlamaServer response_format type must be json_object"
+                );
+                // Known, contained vendor deviation: llama.cpp accepts a
+                // `schema` sibling of json_object; standard OpenAI does not.
+                assert!(
+                    rf.contains_key("schema"),
+                    "LlamaServer style is expected to carry the schema deviation"
+                );
+            }
+        }
+    }
+
+    /// Builds the two standard messages the distiller always sends, so each
+    /// conformance case differs only in `response_format`.
+    fn conformance_messages() -> Vec<ChatMessage<'static>> {
+        vec![
+            ChatMessage {
+                role: "system",
+                content: SYSTEM_PROMPT.to_owned(),
+            },
+            ChatMessage {
+                role: "user",
+                content: "transcript".to_owned(),
+            },
+        ]
+    }
+
+    #[test]
+    fn request_body_is_openai_portable_struct_level() {
+        // The three shapes the distiller can ever emit, built the same way the
+        // attempt_* methods build them.
+        let openai = ChatRequest {
+            model: "test-model",
+            messages: conformance_messages(),
+            response_format: Some(response_format_payload(SchemaStyle::OpenAi)),
+        };
+        assert_openai_portable(
+            &serde_json::to_value(&openai).expect("serialize"),
+            Some(SchemaStyle::OpenAi),
+        );
+
+        let llama = ChatRequest {
+            model: "test-model",
+            messages: conformance_messages(),
+            response_format: Some(response_format_payload(SchemaStyle::LlamaServer)),
+        };
+        assert_openai_portable(
+            &serde_json::to_value(&llama).expect("serialize"),
+            Some(SchemaStyle::LlamaServer),
+        );
+
+        let prompt_embedded = ChatRequest {
+            model: "test-model",
+            messages: conformance_messages(),
+            response_format: None,
+        };
+        assert_openai_portable(
+            &serde_json::to_value(&prompt_embedded).expect("serialize"),
+            None,
+        );
+    }
+
+    /// Wire-level proof companion to
+    /// `request_body_is_openai_portable_struct_level`: runs a real `distill()`
+    /// call against the mock server and checks the bytes that actually went
+    /// over the wire, not just a struct built by hand in the test.
+    #[test]
+    fn request_body_is_openai_portable_wire_level() {
+        let body = json!({
+            "summary": "x",
+            "facts": []
+        })
+        .to_string();
+        let envelope = json!({
+            "choices": [
+                {"message": {"content": body}}
+            ]
+        })
+        .to_string();
+
+        let (url, rx) = spawn_mock_server(vec![MockResponse {
+            status_line: "HTTP/1.1 200 OK",
+            body: envelope,
+        }]);
+
+        let distiller = distiller_for(&url);
+        distiller.distill("hello transcript").expect("distill ok");
+
+        let request_body = rx.recv().expect("captured request");
+        let parsed: Value =
+            serde_json::from_str(&request_body).expect("request body is valid JSON");
+        assert_openai_portable(&parsed, Some(SchemaStyle::OpenAi));
     }
 }

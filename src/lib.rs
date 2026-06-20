@@ -102,7 +102,10 @@ use std::path::Path;
 
 // Re-export primary types at crate root for convenience.
 pub use config::{Config, EvictionPolicy};
-pub use distill::{DistilledMemory, Distiller, Fact, FactKind};
+pub use distill::{
+    merge_distilled, split_on_budget, ChunkingDistiller, DistilledMemory, Distiller, Fact,
+    FactKind, ReduceStrategy,
+};
 pub use engine::{ContextEngine, SaveOptions, MATCH_ALL_QUERY};
 pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::Error;
