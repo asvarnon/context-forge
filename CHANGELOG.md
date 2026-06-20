@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-06-20
+
+### Features
+
+- Local-LLM distillation via an OpenAI-compatible endpoint (Ollama/llama-server), behind the `distill-http` feature ([#88](https://github.com/asvarnon/context-forge/pull/88))
+- Save-time secret scrubbing and the untrusted-memory doctrine ([#86](https://github.com/asvarnon/context-forge/pull/86))
+- Opt-in rayon-parallel analysis behind the `parallel` feature ([#87](https://github.com/asvarnon/context-forge/pull/87))
+- Chunked distillation: `ChunkingDistiller` decorator, `split_on_budget`, `merge_distilled`, and `ReduceStrategy` (`Structural`/`Llm`) bound per-request prompt size on long transcripts without dropping data ([#92](https://github.com/asvarnon/context-forge/pull/92))
+
+### Refactoring
+
+- Collapsed the multi-crate workspace into a single `context-forge` library crate; deleted the CLI, napi bridge, and VS Code extension ([#86](https://github.com/asvarnon/context-forge/pull/86))
+- Generalized the data model to scoped entries (schema v3) and introduced the `ContextForge` facade with structured errors ([#86](https://github.com/asvarnon/context-forge/pull/86))
+
+### Bug Fixes
+
+- *(distill)* Bound distilled output (fact count + text size) before save ([#89](https://github.com/asvarnon/context-forge/issues/89)) ([dc2cd3a](https://github.com/asvarnon/context-forge/commit/dc2cd3a383558913b84207c7a488a20f7a041b70))
+- *(search)* Sanitize FTS5 query input and OR-join terms; arm busy_timeout before WAL ([#90](https://github.com/asvarnon/context-forge/issues/90)) ([f586583](https://github.com/asvarnon/context-forge/commit/f586583850fc58d078ff0decac73b4d1d6c499ac))
+- Transport-error short-circuit, minimal rustls stack, redirect hardening for the HTTP distiller ([#88](https://github.com/asvarnon/context-forge/pull/88))
+
+### Documentation
+
+- *(readme)* Mark parallel feature implemented; update status + version to beta.3 ([#91](https://github.com/asvarnon/context-forge/issues/91)) ([97d7cb7](https://github.com/asvarnon/context-forge/commit/97d7cb767d53f53a460eb016563ece65bda551fa))
+- Rewrote README and docs for the library-only purpose ([#86](https://github.com/asvarnon/context-forge/pull/86))
+- OpenAI-compatibility conformance test guarding the wire format, plus a "Chunked distillation" README section and runnable example ([#92](https://github.com/asvarnon/context-forge/pull/92))
+
+### Miscellaneous
+
+- crates.io publish prep: package metadata, `#![warn(missing_docs)]`, relicensed MIT → Apache-2.0 ([#88](https://github.com/asvarnon/context-forge/pull/88))
+- Added LICENSE file ([#85](https://github.com/asvarnon/context-forge/pull/85))
+
 ## [0.4.0] - 2026-04-05
 
 ### Features
