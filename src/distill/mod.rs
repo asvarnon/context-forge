@@ -15,6 +15,7 @@
 pub mod openai_compat;
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -225,6 +226,81 @@ fn hard_split(mut line: &str, max_chars: usize) -> Vec<&str> {
     pieces
 }
 
+/// Strategy used to reduce several partial [`DistilledMemory`] results —
+/// one per transcript chunk — into a single result.
+///
+/// `Structural` is the default: deterministic, no extra model call, and
+/// therefore no extra risk of re-introducing the prompt-size problem
+/// chunking exists to fix. `Llm` is strictly opt-in — it can produce better
+/// prose and more semantic deduplication, but it is a second, non-
+/// deterministic pass that re-reads already-distilled output and could
+/// silently drop a detail the first pass captured. Prefer `Structural`
+/// unless you have a specific reason to accept that tradeoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReduceStrategy {
+    /// Merge partial results with [`merge_distilled`]. Deterministic, no
+    /// model call.
+    #[default]
+    Structural,
+    /// Render partial results back into text and call the distiller on
+    /// them once more for a consolidated pass.
+    Llm,
+}
+
+/// Renders partial distillation results back into a single transcript-like
+/// string, for [`ReduceStrategy::Llm`]: each part's summary and facts are
+/// listed in order, so a model reading the result can see everything every
+/// chunk produced and consolidate it in one pass.
+// TODO(step 5): remove this `allow` once `ChunkingDistiller` calls `reduce`
+// (which calls this) — at that point it's no longer dead code.
+#[allow(dead_code)]
+fn render_partials(parts: &[DistilledMemory]) -> String {
+    let mut rendered = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        let _ = writeln!(rendered, "Summary {}: {}", i + 1, part.summary);
+        if !part.facts.is_empty() {
+            rendered.push_str("Facts:\n");
+            for fact in &part.facts {
+                let _ = writeln!(rendered, "- [{:?}] {}", fact.kind, fact.text);
+            }
+        }
+        rendered.push('\n');
+    }
+    rendered
+}
+
+/// Reduces `parts` — one [`DistilledMemory`] per transcript chunk — into a
+/// single [`DistilledMemory`], using `strategy` to choose how.
+///
+/// An empty `parts` short-circuits to [`merge_distilled`]'s empty-`Vec`
+/// behavior regardless of `strategy`: there is nothing for `inner` to
+/// reduce, so there is nothing to call it with.
+///
+/// # Errors
+///
+/// Returns an error if `strategy` is [`ReduceStrategy::Llm`] and the call to
+/// `inner.distill` fails.
+// TODO(step 5): remove this `allow` once `ChunkingDistiller` calls this —
+// at that point it's no longer dead code.
+#[allow(dead_code)]
+fn reduce<D: Distiller>(
+    parts: Vec<DistilledMemory>,
+    inner: &D,
+    strategy: ReduceStrategy,
+) -> Result<DistilledMemory> {
+    if parts.is_empty() {
+        return Ok(merge_distilled(parts));
+    }
+
+    match strategy {
+        ReduceStrategy::Structural => Ok(merge_distilled(parts)),
+        ReduceStrategy::Llm => {
+            let rendered = render_partials(&parts);
+            inner.distill(&rendered)
+        }
+    }
+}
+
 /// Produces [`DistilledMemory`] from a raw conversation transcript.
 ///
 /// Implementations must be thread-safe (`Send + Sync`) so a single
@@ -252,9 +328,10 @@ pub trait Distiller: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_distilled_memory, merge_distilled, split_on_budget, DistilledMemory, Fact, FactKind,
-        MAX_FACTS, MAX_FACT_CHARS, MAX_SUMMARY_CHARS,
+        cap_distilled_memory, merge_distilled, reduce, split_on_budget, DistilledMemory, Distiller,
+        Fact, FactKind, ReduceStrategy, MAX_FACTS, MAX_FACT_CHARS, MAX_SUMMARY_CHARS,
     };
+    use crate::traits::Result;
 
     fn fact(text: impl Into<String>) -> Fact {
         Fact {
@@ -509,5 +586,104 @@ mod tests {
 
         assert_eq!(chunks, vec!["a\nbb\nccc"]);
         assert_eq!(chunks.concat(), transcript);
+    }
+
+    /// A [`Distiller`] that panics if called, used to prove a code path
+    /// under test never invokes the inner distiller at all.
+    struct PanicIfCalledDistiller;
+
+    impl Distiller for PanicIfCalledDistiller {
+        fn distill(&self, _transcript: &str) -> Result<DistilledMemory> {
+            panic!("inner.distill should not be called for this reduce strategy");
+        }
+    }
+
+    /// A [`Distiller`] that records every transcript it was called with (in
+    /// call order) and returns a fixed [`DistilledMemory`].
+    struct RecordingDistiller {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingDistiller {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Distiller for RecordingDistiller {
+        fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
+            self.calls.lock().unwrap().push(transcript.to_owned());
+            Ok(DistilledMemory {
+                summary: "Consolidated summary.".to_owned(),
+                facts: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn reduce_structural_never_calls_inner() {
+        let parts = vec![
+            DistilledMemory {
+                summary: "First.".to_owned(),
+                facts: vec![fact("Fact A")],
+            },
+            DistilledMemory {
+                summary: "Second.".to_owned(),
+                facts: vec![fact("Fact B")],
+            },
+        ];
+
+        let result = reduce(
+            parts.clone(),
+            &PanicIfCalledDistiller,
+            ReduceStrategy::Structural,
+        )
+        .expect("structural reduce does not call inner, so it cannot fail");
+
+        assert_eq!(result.summary, merge_distilled(parts).summary);
+    }
+
+    #[test]
+    fn reduce_empty_parts_returns_empty_without_calling_inner() {
+        let result = reduce(vec![], &PanicIfCalledDistiller, ReduceStrategy::Llm)
+            .expect("empty parts short-circuits before inner is ever called");
+
+        assert_eq!(result.summary, "");
+        assert!(result.facts.is_empty());
+    }
+
+    #[test]
+    fn reduce_llm_calls_inner_exactly_once_with_rendered_partials() {
+        let parts = vec![
+            DistilledMemory {
+                summary: "First chunk summary.".to_owned(),
+                facts: vec![fact("Fact A")],
+            },
+            DistilledMemory {
+                summary: "Second chunk summary.".to_owned(),
+                facts: vec![Fact {
+                    kind: FactKind::Decision,
+                    text: "Fact B".to_owned(),
+                }],
+            },
+        ];
+        let distiller = RecordingDistiller::new();
+
+        let result = reduce(parts, &distiller, ReduceStrategy::Llm).unwrap();
+
+        let calls = distiller.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "inner.distill must be called exactly once");
+
+        let rendered = &calls[0];
+        assert!(rendered.contains("First chunk summary."));
+        assert!(rendered.contains("Second chunk summary."));
+        assert!(rendered.contains("[State] Fact A"));
+        assert!(rendered.contains("[Decision] Fact B"));
+
+        // The result is whatever the single consolidated call returned, not
+        // a merge of the original parts.
+        assert_eq!(result.summary, "Consolidated summary.");
     }
 }
