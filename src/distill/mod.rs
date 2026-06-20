@@ -251,9 +251,6 @@ pub enum ReduceStrategy {
 /// string, for [`ReduceStrategy::Llm`]: each part's summary and facts are
 /// listed in order, so a model reading the result can see everything every
 /// chunk produced and consolidate it in one pass.
-// TODO(step 5): remove this `allow` once `ChunkingDistiller` calls `reduce`
-// (which calls this) — at that point it's no longer dead code.
-#[allow(dead_code)]
 fn render_partials(parts: &[DistilledMemory]) -> String {
     let mut rendered = String::new();
     for (i, part) in parts.iter().enumerate() {
@@ -280,9 +277,6 @@ fn render_partials(parts: &[DistilledMemory]) -> String {
 ///
 /// Returns an error if `strategy` is [`ReduceStrategy::Llm`] and the call to
 /// `inner.distill` fails.
-// TODO(step 5): remove this `allow` once `ChunkingDistiller` calls this —
-// at that point it's no longer dead code.
-#[allow(dead_code)]
 fn reduce<D: Distiller>(
     parts: Vec<DistilledMemory>,
     inner: &D,
@@ -325,12 +319,77 @@ pub trait Distiller: Send + Sync {
     fn distill(&self, transcript: &str) -> Result<DistilledMemory>;
 }
 
+/// A [`Distiller`] decorator that bounds the size of any single prompt sent
+/// to `inner`.
+///
+/// A long transcript is split into chunks of at most `max_chunk_chars` (via
+/// [`split_on_budget`]), each chunk is distilled independently through
+/// `inner`, and the partial results are combined into one
+/// [`DistilledMemory`] (via [`reduce`], using the configured
+/// [`ReduceStrategy`]). A transcript that already fits in one chunk — including
+/// an empty transcript — is passed through to `inner` unchanged, with no
+/// splitting or reducing.
+///
+/// `max_chunk_chars` is caller-supplied policy: this type has no opinion on
+/// what a safe prompt size is for any particular model or host, only on how
+/// to split, map, and reduce once a budget is given.
+pub struct ChunkingDistiller<D: Distiller> {
+    inner: D,
+    max_chunk_chars: usize,
+    reduce: ReduceStrategy,
+}
+
+impl<D: Distiller> ChunkingDistiller<D> {
+    /// Wraps `inner`, splitting any transcript over `max_chunk_chars` into
+    /// multiple distillation calls. Uses [`ReduceStrategy::Structural`] to
+    /// combine the results; call [`Self::with_reduce_strategy`] to use
+    /// [`ReduceStrategy::Llm`] instead.
+    pub fn new(inner: D, max_chunk_chars: usize) -> Self {
+        Self {
+            inner,
+            max_chunk_chars,
+            reduce: ReduceStrategy::default(),
+        }
+    }
+
+    /// Sets the [`ReduceStrategy`] used to combine chunk results.
+    #[must_use]
+    pub fn with_reduce_strategy(mut self, strategy: ReduceStrategy) -> Self {
+        self.reduce = strategy;
+        self
+    }
+}
+
+impl<D: Distiller> Distiller for ChunkingDistiller<D> {
+    /// # Errors
+    ///
+    /// Returns an error if any chunk's call to `inner.distill` fails, or if
+    /// [`ReduceStrategy::Llm`] is used and the consolidating call fails. On
+    /// error, no partial result is produced: chunks already distilled
+    /// successfully before the failure are discarded, not saved or returned.
+    fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
+        let chunks = split_on_budget(transcript, self.max_chunk_chars);
+        if chunks.len() <= 1 {
+            return self.inner.distill(transcript);
+        }
+
+        let parts = chunks
+            .iter()
+            .map(|chunk| self.inner.distill(chunk))
+            .collect::<Result<Vec<_>>>()?;
+
+        reduce(parts, &self.inner, self.reduce)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_distilled_memory, merge_distilled, reduce, split_on_budget, DistilledMemory, Distiller,
-        Fact, FactKind, ReduceStrategy, MAX_FACTS, MAX_FACT_CHARS, MAX_SUMMARY_CHARS,
+        cap_distilled_memory, merge_distilled, reduce, split_on_budget, ChunkingDistiller,
+        DistilledMemory, Distiller, Fact, FactKind, ReduceStrategy, MAX_FACTS, MAX_FACT_CHARS,
+        MAX_SUMMARY_CHARS,
     };
+    use crate::error::Error;
     use crate::traits::Result;
 
     fn fact(text: impl Into<String>) -> Fact {
@@ -685,5 +744,129 @@ mod tests {
         // The result is whatever the single consolidated call returned, not
         // a merge of the original parts.
         assert_eq!(result.summary, "Consolidated summary.");
+    }
+
+    /// A [`Distiller`] that records every transcript it was called with into
+    /// a shared, externally observable list. Unlike [`RecordingDistiller`],
+    /// the shared `Arc` lets a test keep inspecting calls after this stub
+    /// has been moved into another type (e.g. [`ChunkingDistiller`], which
+    /// takes ownership of its inner distiller).
+    #[derive(Clone)]
+    struct SharedRecordingDistiller {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SharedRecordingDistiller {
+        fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    impl Distiller for SharedRecordingDistiller {
+        fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
+            self.calls.lock().unwrap().push(transcript.to_owned());
+            Ok(DistilledMemory {
+                summary: "stub summary".to_owned(),
+                facts: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn chunking_distiller_passthrough_calls_inner_once_with_original_transcript() {
+        let (stub, calls) = SharedRecordingDistiller::new();
+        let chunking = ChunkingDistiller::new(stub, 1_000);
+        let transcript = "a short transcript, well under budget";
+
+        chunking.distill(transcript).unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], transcript);
+    }
+
+    #[test]
+    fn chunking_distiller_empty_transcript_calls_inner_once_with_empty_string() {
+        let (stub, calls) = SharedRecordingDistiller::new();
+        let chunking = ChunkingDistiller::new(stub, 1_000);
+
+        chunking.distill("").unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], "");
+    }
+
+    /// A [`Distiller`] that returns content derived from its input
+    /// transcript, so a multi-chunk test can verify each chunk was
+    /// distilled independently (rather than, say, all chunks colliding on
+    /// one fixed stub response).
+    struct EchoDistiller;
+
+    impl Distiller for EchoDistiller {
+        fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
+            Ok(DistilledMemory {
+                summary: format!("Summary of: {transcript}"),
+                facts: vec![Fact {
+                    kind: FactKind::State,
+                    text: format!("Fact from: {transcript}"),
+                }],
+            })
+        }
+    }
+
+    #[test]
+    fn chunking_distiller_maps_each_chunk_and_merges_structurally() {
+        // max_chunk_chars = 4 packs each 4-char line ("aaa\n", "bbb\n") into
+        // its own chunk; see split_on_budget's own tests for this packing
+        // rule. Default reduce strategy is Structural (merge_distilled).
+        let transcript = "aaa\nbbb\n";
+        let chunking = ChunkingDistiller::new(EchoDistiller, 4);
+
+        let result = chunking.distill(transcript).unwrap();
+
+        assert_eq!(result.facts.len(), 2);
+        assert!(result.facts.iter().any(|f| f.text == "Fact from: aaa\n"));
+        assert!(result.facts.iter().any(|f| f.text == "Fact from: bbb\n"));
+        assert!(result.summary.contains("Summary of: aaa\n"));
+        assert!(result.summary.contains("Summary of: bbb\n"));
+    }
+
+    /// A [`Distiller`] that fails for any transcript containing `trigger`,
+    /// otherwise succeeds with a fixed result. Used to prove a single
+    /// chunk's failure propagates instead of being silently dropped.
+    struct FailsOnDistiller {
+        trigger: &'static str,
+    }
+
+    impl Distiller for FailsOnDistiller {
+        fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
+            if transcript.contains(self.trigger) {
+                Err(Error::Distill("simulated chunk failure".to_owned()))
+            } else {
+                Ok(DistilledMemory {
+                    summary: "ok".to_owned(),
+                    facts: vec![],
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn chunking_distiller_propagates_a_single_chunk_failure() {
+        // Same packing as the merge test: "aaa\n" and "bbb\n" become two
+        // chunks under max_chunk_chars = 4. The second chunk fails.
+        let transcript = "aaa\nbbb\n";
+        let chunking = ChunkingDistiller::new(FailsOnDistiller { trigger: "bbb" }, 4);
+
+        let result = chunking.distill(transcript);
+
+        assert!(result.is_err());
     }
 }
