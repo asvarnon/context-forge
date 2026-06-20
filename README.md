@@ -81,6 +81,33 @@ durable storage.
 | `parallel` | no | `rayon` | Opt-in rayon parallelism for the `analysis` pipeline (per-session term maps, classification, scoring). The library never configures the global rayon pool. |
 | `distill-http` | no | `reqwest` | OpenAI-compatible local-LLM distillation (Ollama/llama-server). |
 
+## Chunked distillation
+
+`ChunkingDistiller` wraps any `Distiller` and bounds the size of the prompt
+sent to the model on each call. A long transcript is split into
+budget-sized pieces, each piece is distilled independently, and the partial
+results are merged into one `DistilledMemory`:
+
+```rust
+use context_forge::{ChunkingDistiller, ReduceStrategy};
+
+let distiller = ChunkingDistiller::new(inner_distiller, max_chunk_chars)
+    .with_reduce_strategy(ReduceStrategy::Structural); // the default
+```
+
+`max_chunk_chars` is **caller policy** — this crate has no opinion on what a
+safe prompt size is for any particular model or host; it only knows how to
+split, map, and reduce once given a budget. `ChunkingDistiller` is
+model-agnostic (it wraps any `Distiller`, including a hand-rolled one) and
+needs no feature flags — it works the same with or without `distill-http`.
+
+`merge_distilled` and `split_on_budget`, the pieces `ChunkingDistiller` is
+built from, are also exported directly for callers who want custom
+split/merge logic.
+
+See [`examples/chunked_distill.rs`](examples/chunked_distill.rs) for a
+runnable, no-network example.
+
 ## Async callers
 
 This crate is synchronous by design — it performs blocking SQLite I/O and

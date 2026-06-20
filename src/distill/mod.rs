@@ -105,7 +105,7 @@ pub(crate) fn cap_distilled_memory(memory: DistilledMemory) -> DistilledMemory {
 /// `(kind, normalized text)`, where normalization trims whitespace and
 /// lowercases; the first occurrence of each duplicate is kept. Summaries are
 /// joined with a blank line between them. The combined result is passed
-/// through [`cap_distilled_memory`], so the output is bounded the same way a
+/// through `cap_distilled_memory`, so the output is bounded the same way a
 /// single distillation's output would be.
 ///
 /// This is the pure, deterministic reduce: no model call, safe to call with
@@ -151,7 +151,7 @@ pub fn merge_distilled(parts: Vec<DistilledMemory>) -> DistilledMemory {
 /// `transcript` — the same behavior the crate had before chunking existed.
 /// Debug builds panic via `debug_assert_ne!` so a misconfigured budget is
 /// caught during development; release builds degrade silently, matching
-/// [`cap_distilled_memory`]'s convention of never panicking on
+/// `cap_distilled_memory`'s convention of never panicking on
 /// untrusted/misconfigured input.
 ///
 /// An empty `transcript` returns an empty `Vec` (zero chunks).
@@ -325,7 +325,7 @@ pub trait Distiller: Send + Sync {
 /// A long transcript is split into chunks of at most `max_chunk_chars` (via
 /// [`split_on_budget`]), each chunk is distilled independently through
 /// `inner`, and the partial results are combined into one
-/// [`DistilledMemory`] (via [`reduce`], using the configured
+/// [`DistilledMemory`] (via an internal `reduce` step, using the configured
 /// [`ReduceStrategy`]). A transcript that already fits in one chunk — including
 /// an empty transcript — is passed through to `inner` unchanged, with no
 /// splitting or reducing.

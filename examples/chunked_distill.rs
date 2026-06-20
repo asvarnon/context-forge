@@ -11,9 +11,9 @@
 //! cargo run --example chunked_distill
 //! ```
 
-use context_forge::distill::ChunkingDistiller;
 use context_forge::{
-    Config, ContextForge, DistilledMemory, Distiller, Fact, FactKind, SaveOptions,
+    ChunkingDistiller, Config, ContextForge, DistilledMemory, Distiller, Fact, FactKind,
+    SaveOptions,
 };
 use std::path::PathBuf;
 
