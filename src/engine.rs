@@ -96,7 +96,10 @@ impl ContextEngine {
         scope: Option<&str>,
         token_budget: usize,
     ) -> Result<Vec<ContextEntry>> {
-        let candidates = self.searcher.search(query, scope, DEFAULT_SEARCH_LIMIT).await?;
+        let candidates = self
+            .searcher
+            .search(query, scope, DEFAULT_SEARCH_LIMIT)
+            .await?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -214,9 +217,9 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::config::{EvictionPolicy, DEFAULT_RECENCY_HALF_LIFE_SECS};
     use crate::entry::ScoredEntry;
+    use async_trait::async_trait;
     use std::path::PathBuf;
     use std::sync::Mutex;
 

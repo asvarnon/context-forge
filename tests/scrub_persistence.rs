@@ -34,7 +34,10 @@ async fn github_token_is_scrubbed_before_persistence() {
     // (a) The stored content does not contain the raw token.
     // get_all() reads directly from the storage layer without any read-time
     // scrubbing, so this is equivalent to inspecting the raw database rows.
-    let all: Vec<_> = cf.query(MATCH_ALL_QUERY, None, 1000).await.expect("get all entries");
+    let all: Vec<_> = cf
+        .query(MATCH_ALL_QUERY, None, 1000)
+        .await
+        .expect("get all entries");
     assert_eq!(all.len(), 1, "should have exactly one entry");
     let stored = &all[0].content;
     assert!(
@@ -75,7 +78,10 @@ async fn opt_out_stores_token_verbatim() {
         .await
         .expect("save unscrubbed entry");
 
-    let all: Vec<_> = cf.query(MATCH_ALL_QUERY, None, 1000).await.expect("get all entries");
+    let all: Vec<_> = cf
+        .query(MATCH_ALL_QUERY, None, 1000)
+        .await
+        .expect("get all entries");
     assert_eq!(all.len(), 1, "should have exactly one entry");
     let stored = &all[0].content;
 

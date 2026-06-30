@@ -30,7 +30,9 @@ async fn main() -> Result<(), context_forge::Error> {
     .await?;
 
     // Query within that scope, capped to a token budget.
-    let hits = cf.query("deploy failure", Some("project:demo"), 2048).await?;
+    let hits = cf
+        .query("deploy failure", Some("project:demo"), 2048)
+        .await?;
     for hit in &hits {
         println!("{}: {}", hit.id, hit.content);
     }

@@ -83,7 +83,9 @@ User: Also, remember I prefer terse commit messages, one line max.
         ids.len() - 1
     );
 
-    let hits = cf.query("canary commit", Some("project:demo"), 2048).await?;
+    let hits = cf
+        .query("canary commit", Some("project:demo"), 2048)
+        .await?;
     println!("\nQuery results for \"canary commit\":");
     for hit in &hits {
         println!("{}: {}", hit.id, hit.content);

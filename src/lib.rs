@@ -408,8 +408,12 @@ mod tests {
         };
         let cf = ContextForge::open(config).await.unwrap();
 
-        cf.save("a", kind::MANUAL, &SaveOptions::default()).await.unwrap();
-        cf.save("b", kind::MANUAL, &SaveOptions::default()).await.unwrap();
+        cf.save("a", kind::MANUAL, &SaveOptions::default())
+            .await
+            .unwrap();
+        cf.save("b", kind::MANUAL, &SaveOptions::default())
+            .await
+            .unwrap();
 
         let cleared = cf.clear_all().await.unwrap();
         assert_eq!(cleared, 2);
@@ -466,7 +470,10 @@ mod tests {
             metadata: None,
         };
 
-        let ids = cf.distill_and_save(transcript, &distiller, &opts).await.unwrap();
+        let ids = cf
+            .distill_and_save(transcript, &distiller, &opts)
+            .await
+            .unwrap();
 
         // Summary ID first, then one ID per fact.
         assert_eq!(ids.len(), 3);

@@ -56,20 +56,13 @@ impl TursoStorage {
 
         // Rebuild tantivy index from all existing entries.
         let fts = FtsIndex::new()?;
-        let mut rows = conn
-            .query(
-                "SELECT id, content FROM entries",
-                (),
-            )
-            .await?;
+        let mut rows = conn.query("SELECT id, content FROM entries", ()).await?;
         while let Some(row) = rows.next().await? {
-            let id = match row.get_value(0)? {
-                turso::Value::Text(s) => s,
-                _ => continue,
+            let turso::Value::Text(id) = row.get_value(0)? else {
+                continue;
             };
-            let content = match row.get_value(1)? {
-                turso::Value::Text(s) => s,
-                _ => continue,
+            let turso::Value::Text(content) = row.get_value(1)? else {
+                continue;
             };
             fts.add(&id, &content)?;
         }
@@ -114,7 +107,7 @@ pub(crate) fn turso_row_to_entry(row: &turso::Row) -> crate::Result<ContextEntry
         .map_err(|e| crate::Error::Migration(e.to_string()))?
         // json_patch('{}', json_object(nulls)) produces "{}"; treat empty object as None.
         .and_then(|v| {
-            if v.as_object().is_some_and(|m| m.is_empty()) {
+            if v.as_object().is_some_and(serde_json::Map::is_empty) {
                 None
             } else {
                 Some(v)
@@ -200,8 +193,7 @@ impl ContextStorage for TursoStorage {
             };
 
             if !exists {
-                let mut count_rows =
-                    conn.query("SELECT COUNT(*) FROM entries", ()).await?;
+                let mut count_rows = conn.query("SELECT COUNT(*) FROM entries", ()).await?;
                 let count: i64 = match count_rows.next().await? {
                     Some(row) => match row.get_value(0)? {
                         turso::Value::Integer(n) => n,
@@ -210,7 +202,7 @@ impl ContextStorage for TursoStorage {
                     None => 0,
                 };
 
-                if count >= max_entries as i64 {
+                if count >= i64::try_from(max_entries).unwrap_or(i64::MAX) {
                     conn.execute(
                         "DELETE FROM entries WHERE id = \
                          (SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
@@ -231,7 +223,9 @@ impl ContextStorage for TursoStorage {
                     entry.kind.clone(),
                     entry.scope.clone(),
                     entry.session_id.clone(),
-                    entry.token_count.map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+                    entry
+                        .token_count
+                        .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
                     metadata_json,
                 ),
             )
@@ -313,7 +307,7 @@ impl ContextStorage for TursoStorage {
 
         let affected = conn.execute("DELETE FROM entries", ()).await?;
         self.fts.clear()?;
-        Ok(affected as usize)
+        Ok(usize::try_from(affected).unwrap_or(usize::MAX))
     }
 
     async fn clear_scope(&self, scope: &str) -> crate::Result<usize> {
@@ -335,16 +329,13 @@ impl ContextStorage for TursoStorage {
         }
 
         let affected = conn
-            .execute(
-                "DELETE FROM entries WHERE scope = ?1",
-                (scope.to_owned(),),
-            )
+            .execute("DELETE FROM entries WHERE scope = ?1", (scope.to_owned(),))
             .await?;
 
         for id in &ids {
             self.fts.remove(id)?;
         }
-        Ok(affected as usize)
+        Ok(usize::try_from(affected).unwrap_or(usize::MAX))
     }
 
     async fn count(&self) -> crate::Result<usize> {
@@ -354,7 +345,7 @@ impl ContextStorage for TursoStorage {
         let mut rows = conn.query("SELECT COUNT(*) FROM entries", ()).await?;
         match rows.next().await? {
             Some(row) => match row.get_value(0)? {
-                turso::Value::Integer(n) => Ok(n as usize),
+                turso::Value::Integer(n) => Ok(usize::try_from(n).unwrap_or(0)),
                 _ => Ok(0),
             },
             None => Ok(0),

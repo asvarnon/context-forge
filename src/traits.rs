@@ -95,5 +95,10 @@ pub trait Searcher: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the underlying search fails.
-    async fn search(&self, query: &str, scope: Option<&str>, limit: usize) -> Result<Vec<ScoredEntry>>;
+    async fn search(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ScoredEntry>>;
 }

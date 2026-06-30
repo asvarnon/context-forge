@@ -119,7 +119,11 @@ impl Searcher for TursoSearcher {
             .collect();
 
         // tantivy already sorted by score DESC; preserve that order.
-        result.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        result.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(result)
     }
@@ -142,10 +146,7 @@ impl TursoSearcher {
                  WHERE (?1 IS NULL OR scope = ?1) \
                  ORDER BY timestamp DESC \
                  LIMIT ?2",
-                (
-                    scope_owned,
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                ),
+                (scope_owned, i64::try_from(limit).unwrap_or(i64::MAX)),
             )
             .await?;
 

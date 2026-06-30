@@ -13,7 +13,9 @@ fn scoped_options(scope: &str) -> SaveOptions {
 #[tokio::test]
 async fn scoped_save_and_query_do_not_cross_contaminate() {
     let config = Config::default();
-    let cf = ContextForge::open(config).await.expect("open in-memory store");
+    let cf = ContextForge::open(config)
+        .await
+        .expect("open in-memory store");
 
     cf.save(
         "alpha project deploy notes",
@@ -49,11 +51,17 @@ async fn scoped_save_and_query_do_not_cross_contaminate() {
     assert!(beta_hits[0].content.contains("beta"));
 
     // Query with no scope sees both.
-    let global_hits = cf.query("deploy notes", None, 1000).await.expect("global query");
+    let global_hits = cf
+        .query("deploy notes", None, 1000)
+        .await
+        .expect("global query");
     assert_eq!(global_hits.len(), 2);
 
     // clear_scope(A) removes only A's entries.
-    let cleared = cf.clear_scope("project:alpha").await.expect("clear scope A");
+    let cleared = cf
+        .clear_scope("project:alpha")
+        .await
+        .expect("clear scope A");
     assert_eq!(cleared, 1);
 
     let remaining = cf
@@ -69,7 +77,9 @@ async fn scoped_save_and_query_do_not_cross_contaminate() {
 #[tokio::test]
 async fn match_all_query_respects_scope() {
     let config = Config::default();
-    let cf = ContextForge::open(config).await.expect("open in-memory store");
+    let cf = ContextForge::open(config)
+        .await
+        .expect("open in-memory store");
 
     cf.save("entry one", kind::MANUAL, &scoped_options("scope-a"))
         .await
