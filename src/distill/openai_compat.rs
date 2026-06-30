@@ -212,7 +212,7 @@ pub struct OpenAiCompatDistiller {
     model: String,
     schema_style: SchemaStyle,
     max_transcript_chars: usize,
-    client: reqwest::blocking::Client,
+    timeout: Duration,
 }
 
 impl OpenAiCompatDistiller {
@@ -229,13 +229,12 @@ impl OpenAiCompatDistiller {
     /// Returns an error if the underlying HTTP client cannot be
     /// constructed.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Result<Self> {
-        let client = Self::build_client(Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
         Ok(Self {
             base_url: base_url.into(),
             model: model.into(),
             schema_style: SchemaStyle::default(),
             max_transcript_chars: DEFAULT_MAX_TRANSCRIPT_CHARS,
-            client,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         })
     }
 
@@ -246,16 +245,11 @@ impl OpenAiCompatDistiller {
         self
     }
 
-    /// Sets the request timeout in seconds, rebuilding the underlying HTTP
-    /// client.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying HTTP client cannot be
-    /// constructed.
-    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Result<Self> {
-        self.client = Self::build_client(Duration::from_secs(timeout_secs))?;
-        Ok(self)
+    /// Sets the request timeout in seconds.
+    #[must_use]
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout = Duration::from_secs(timeout_secs);
+        self
     }
 
     /// Sets the maximum number of transcript characters sent to the model;
@@ -292,9 +286,10 @@ impl OpenAiCompatDistiller {
     /// — only the latter triggers the prompt-embedded fallback.
     fn send_raw(
         &self,
+        client: &reqwest::blocking::Client,
         body: &ChatRequest<'_>,
     ) -> std::result::Result<reqwest::blocking::Response, reqwest::Error> {
-        self.client.post(self.endpoint()).json(body).send()
+        client.post(self.endpoint()).json(body).send()
     }
 
     /// Sends a chat completion request and returns the parsed response
@@ -342,6 +337,7 @@ impl OpenAiCompatDistiller {
     /// (non-2xx status, unparsable body) is [`AttemptError::Rejected`].
     fn attempt_structured(
         &self,
+        client: &reqwest::blocking::Client,
         transcript: &str,
     ) -> std::result::Result<DistilledMemory, AttemptError> {
         let body = ChatRequest {
@@ -359,7 +355,7 @@ impl OpenAiCompatDistiller {
             response_format: Some(response_format_payload(self.schema_style)),
         };
 
-        let raw = self.send_raw(&body).map_err(AttemptError::from)?;
+        let raw = self.send_raw(client, &body).map_err(AttemptError::from)?;
         let response = Self::parse_response(raw)?;
         let content = Self::message_content(response)?;
         serde_json::from_str(&content).map_err(|_| AttemptError::Rejected)
@@ -367,7 +363,11 @@ impl OpenAiCompatDistiller {
 
     /// Attempt 2: request with no `response_format` and the schema embedded
     /// in the prompt; strips Markdown code fences before parsing.
-    fn attempt_prompt_embedded(&self, transcript: &str) -> Result<DistilledMemory> {
+    fn attempt_prompt_embedded(
+        &self,
+        client: &reqwest::blocking::Client,
+        transcript: &str,
+    ) -> Result<DistilledMemory> {
         let schema = distilled_memory_schema();
         let prompt = format!(
             "{transcript}\n\n---\nRespond with ONLY a JSON object matching this schema, \
@@ -390,7 +390,7 @@ and nothing else:\n{schema}"
         };
 
         let raw = self
-            .send_raw(&body)
+            .send_raw(client, &body)
             .map_err(|e| Error::Distill(format!("request failed: {e}")))?;
         let response = Self::parse_response(raw)?;
         let content = Self::message_content(response)?;
@@ -440,13 +440,24 @@ impl Distiller for OpenAiCompatDistiller {
     /// a [`Distiller`]. Callers invoking [`Distiller::distill`] directly are
     /// responsible for scrubbing first.
     fn distill(&self, transcript: &str) -> Result<DistilledMemory> {
-        let truncated = truncate_keep_end(transcript, self.max_transcript_chars);
+        let truncated = truncate_keep_end(transcript, self.max_transcript_chars).to_owned();
+        let this = self.clone();
 
-        match self.attempt_structured(truncated) {
-            Ok(memory) => Ok(memory),
-            Err(AttemptError::Transport(e)) => Err(Error::Distill(format!("request failed: {e}"))),
-            Err(AttemptError::Rejected) => self.attempt_prompt_embedded(truncated),
-        }
+        // Spawn a bare OS thread so reqwest::blocking never runs inside a
+        // tokio worker thread (which would panic with "Cannot start a
+        // runtime from within a runtime").
+        std::thread::spawn(move || {
+            let client = Self::build_client(this.timeout)?;
+            match this.attempt_structured(&client, &truncated) {
+                Ok(memory) => Ok(memory),
+                Err(AttemptError::Transport(e)) => {
+                    Err(Error::Distill(format!("request failed: {e}")))
+                }
+                Err(AttemptError::Rejected) => this.attempt_prompt_embedded(&client, &truncated),
+            }
+        })
+        .join()
+        .map_err(|_| Error::Distill("distill thread panicked".into()))?
     }
 }
 
@@ -529,7 +540,6 @@ mod tests {
         OpenAiCompatDistiller::new(base_url, "test-model")
             .expect("construct distiller")
             .with_timeout_secs(5)
-            .expect("set timeout")
     }
 
     #[test]
@@ -760,8 +770,7 @@ mod tests {
         let url = format!("http://{addr}");
         let distiller = OpenAiCompatDistiller::new(&url, "test-model")
             .expect("construct distiller")
-            .with_timeout_secs(1)
-            .expect("set timeout");
+            .with_timeout_secs(1);
 
         let err = distiller.distill("hello transcript").unwrap_err();
         assert!(matches!(err, Error::Distill(_)));

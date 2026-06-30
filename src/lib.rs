@@ -186,7 +186,7 @@ impl ContextForge {
         opts: &SaveOptions,
     ) -> Result<Vec<String>> {
         let scrubbed_transcript = scrub_secrets(transcript, &self.scrub_config);
-        let memory = distiller.distill(&scrubbed_transcript)?;
+        let memory = tokio::task::block_in_place(|| distiller.distill(&scrubbed_transcript))?;
         let memory = crate::distill::cap_distilled_memory(memory);
 
         let mut ids = Vec::with_capacity(1 + memory.facts.len());
@@ -449,7 +449,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn distill_and_save_scrubs_saves_and_returns_ids() {
         let config = Config {
             db_path: PathBuf::from(":memory:"),
@@ -528,7 +528,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn distill_and_save_caps_excess_facts() {
         let config = Config {
             db_path: PathBuf::from(":memory:"),
