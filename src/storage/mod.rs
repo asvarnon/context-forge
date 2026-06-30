@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::TransactionBehavior;
@@ -9,25 +10,36 @@ use crate::entry::ContextEntry;
 use crate::storage::schema::{migrate, row_to_entry};
 use crate::traits::ContextStorage;
 
+// Shim-phase error converters: rusqlite/r2d2 errors become Migration strings
+// until Step 3 replaces the rusqlite bodies with real Turso implementations.
+fn re(e: rusqlite::Error) -> crate::Error { crate::Error::Migration(e.to_string()) }
+fn pe(e: r2d2::Error) -> crate::Error { crate::Error::Migration(e.to_string()) }
+
 /// Forward-only schema migrations and row-to-entry conversion.
 pub mod schema;
-/// FTS5-backed `Searcher` implementation.
+/// FTS5-backed `Searcher` implementation backed by rusqlite/spawn_blocking.
 pub mod searcher;
+/// Turso-native async storage implementation.
+pub mod turso_storage;
+/// Turso-native async FTS5 searcher.
+pub mod turso_searcher;
 
 pub use searcher::SqliteSearcher;
+pub use turso_searcher::TursoSearcher;
+pub use turso_storage::TursoStorage;
 
-/// Create a paired storage + searcher sharing the same connection pool.
+/// Create a paired storage + searcher backed by turso.
 ///
 /// # Errors
 ///
-/// Returns an error if the database cannot be opened, the connection pool
-/// cannot be built, or migrations fail.
-pub fn open_storage(
+/// Returns an error if the database cannot be opened or migrations fail.
+pub async fn open_storage(
     db_path: &Path,
     max_entries: usize,
-) -> crate::Result<(SqliteStorage, SqliteSearcher)> {
-    let storage = SqliteStorage::open(db_path, max_entries)?;
-    let searcher = SqliteSearcher::new(storage.pool());
+) -> crate::Result<(TursoStorage, TursoSearcher)> {
+    let storage = TursoStorage::open(db_path, max_entries).await?;
+    let db = Arc::clone(&storage.db);
+    let searcher = TursoSearcher::new(db);
     Ok((storage, searcher))
 }
 
@@ -79,9 +91,9 @@ impl SqliteStorage {
             builder = builder.max_size(4);
         }
 
-        let pool = builder.build(manager)?;
+        let pool = builder.build(manager).map_err(pe)?;
 
-        let conn = pool.get()?;
+        let conn = pool.get().map_err(pe)?;
         migrate(&conn)?;
 
         Ok(Self {
@@ -103,12 +115,14 @@ impl SqliteStorage {
     ///
     /// Returns an error if the connection pool or query fails.
     pub fn schema_version(&self) -> crate::Result<i64> {
-        let conn = self.pool.get()?;
-        let version = conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |row| row.get(0),
-        )?;
+        let conn = self.pool.get().map_err(pe)?;
+        let version = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(re)?;
         Ok(version)
     }
 
@@ -120,148 +134,156 @@ impl SqliteStorage {
     ///
     /// Returns an error if the connection pool or checkpoint pragma fails.
     pub fn checkpoint(&self) -> crate::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let conn = self.pool.get().map_err(pe)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").map_err(re)?;
         Ok(())
     }
 }
 
+#[async_trait]
 impl ContextStorage for SqliteStorage {
-    fn save(&self, entry: &ContextEntry) -> crate::Result<()> {
-        let mut conn = self.pool.get()?;
+    async fn save(&self, entry: &ContextEntry) -> crate::Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let max_entries = self.max_entries;
+        let entry = entry.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get().map_err(pe)?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(re)?;
 
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+                [&entry.id],
+                |r| r.get(0),
+            ).map_err(re)?;
 
-        // LRU eviction: only evict when inserting a new entry (not replacing
-        // an existing ID) and currently at capacity.
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
-            [&entry.id],
-            |r| r.get(0),
-        )?;
-
-        if !exists {
-            let current_count: i64 =
-                tx.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
-
-            let current_count = usize::try_from(current_count).unwrap_or(usize::MAX);
-            if current_count >= self.max_entries {
-                tx.execute(
-                    "DELETE FROM entries WHERE id = (\
-                     SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
-                    [],
-                )?;
+            if !exists {
+                let current_count: i64 =
+                    tx.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).map_err(re)?;
+                let current_count = usize::try_from(current_count).unwrap_or(usize::MAX);
+                if current_count >= max_entries {
+                    tx.execute(
+                        "DELETE FROM entries WHERE id = (\
+                         SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
+                        [],
+                    ).map_err(re)?;
+                }
             }
-        }
 
-        let metadata_json = entry
-            .metadata
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| crate::Error::InvalidEntry(format!("metadata is not valid JSON: {e}")))?;
+            let metadata_json = entry
+                .metadata
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| crate::Error::InvalidEntry(format!("metadata is not valid JSON: {e}")))?;
 
-        tx.execute(
-            "INSERT OR REPLACE INTO entries (
-                id,
-                content,
-                timestamp,
-                kind,
-                scope,
-                session_id,
-                token_count,
-                metadata
-            ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-            )",
-            rusqlite::params![
-                entry.id,
-                entry.content,
-                entry.timestamp,
-                entry.kind,
-                entry.scope,
-                entry.session_id,
-                entry
-                    .token_count
-                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
-                metadata_json,
-            ],
-        )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO entries (
+                    id, content, timestamp, kind, scope,
+                    session_id, token_count, metadata
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    entry.id, entry.content, entry.timestamp, entry.kind,
+                    entry.scope, entry.session_id,
+                    entry.token_count.map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+                    metadata_json,
+                ],
+            ).map_err(re)?;
 
-        tx.commit()?;
-
-        Ok(())
+            tx.commit().map_err(re)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 
-    fn get_top_k(&self, k: usize) -> crate::Result<Vec<ContextEntry>> {
-        let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
-            "SELECT
-                id,
-                content,
-                timestamp,
-                kind,
-                scope,
-                session_id,
-                token_count,
-                metadata
-             FROM entries
-             ORDER BY timestamp DESC
-             LIMIT ?1",
-        )?;
-
-        let entries = stmt
-            .query_map([i64::try_from(k).unwrap_or(i64::MAX)], row_to_entry)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(entries)
+    async fn get_top_k(&self, k: usize) -> crate::Result<Vec<ContextEntry>> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(pe)?;
+            let mut stmt = conn.prepare(
+                "SELECT id, content, timestamp, kind, scope,
+                        session_id, token_count, metadata
+                 FROM entries ORDER BY timestamp DESC LIMIT ?1",
+            ).map_err(re)?;
+            let entries = stmt
+                .query_map([i64::try_from(k).unwrap_or(i64::MAX)], row_to_entry)
+                .map_err(re)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(re)?;
+            Ok(entries)
+        })
+        .await
+        .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 
-    fn get_all(&self) -> crate::Result<Vec<ContextEntry>> {
-        let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
-            "SELECT
-                id,
-                content,
-                timestamp,
-                kind,
-                scope,
-                session_id,
-                token_count,
-                metadata
-             FROM entries
-             ORDER BY timestamp DESC",
-        )?;
-
-        let entries = stmt
-            .query_map([], row_to_entry)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(entries)
+    async fn get_all(&self) -> crate::Result<Vec<ContextEntry>> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(pe)?;
+            let mut stmt = conn.prepare(
+                "SELECT id, content, timestamp, kind, scope,
+                        session_id, token_count, metadata
+                 FROM entries ORDER BY timestamp DESC",
+            ).map_err(re)?;
+            let entries = stmt
+                .query_map([], row_to_entry)
+                .map_err(re)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(re)?;
+            Ok(entries)
+        })
+        .await
+        .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 
-    fn delete(&self, id: &str) -> crate::Result<bool> {
-        let conn = self.pool.get()?;
-        let changes = conn.execute("DELETE FROM entries WHERE id = ?1", [id])?;
-        Ok(changes > 0)
+    async fn delete(&self, id: &str) -> crate::Result<bool> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(pe)?;
+            let changes = conn.execute("DELETE FROM entries WHERE id = ?1", [id.as_str()]).map_err(re)?;
+            Ok(changes > 0)
+        })
+        .await
+        .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 
-    fn clear(&self) -> crate::Result<usize> {
-        let conn = self.pool.get()?;
-        let changes = conn.execute("DELETE FROM entries", [])?;
-        Ok(changes)
+    async fn clear(&self) -> crate::Result<usize> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(pe)?;
+            let changes = conn.execute("DELETE FROM entries", []).map_err(re)?;
+            Ok(changes)
+        })
+        .await
+        .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 
-    fn clear_scope(&self, scope: &str) -> crate::Result<usize> {
-        let conn = self.pool.get()?;
-        let changes = conn.execute("DELETE FROM entries WHERE scope = ?1", [scope])?;
-        Ok(changes)
+    async fn clear_scope(&self, scope: &str) -> crate::Result<usize> {
+        let pool = Arc::clone(&self.pool);
+        let scope = scope.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(pe)?;
+            let changes = conn.execute(
+                "DELETE FROM entries WHERE scope = ?1", [scope.as_str()]
+            ).map_err(re)?;
+            Ok(changes)
+        })
+        .await
+        .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 
-    fn count(&self) -> crate::Result<usize> {
-        let conn = self.pool.get()?;
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
-        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    async fn count(&self) -> crate::Result<usize> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(pe)?;
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+                .map_err(re)?;
+            Ok(usize::try_from(count).unwrap_or(usize::MAX))
+        })
+        .await
+        .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 }
 
@@ -319,199 +341,143 @@ mod tests {
         assert!(storage.checkpoint().is_ok());
     }
 
-    #[test]
-    fn test_save_and_count() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+    #[tokio::test]
+    async fn test_save_and_count() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
         let entry = make_entry("e1", "hello world", 1000, kind::MANUAL);
-        storage.save(&entry).unwrap();
-        assert_eq!(storage.count().unwrap(), 1);
+        storage.save(&entry).await.unwrap();
+        assert_eq!(storage.count().await.unwrap(), 1);
     }
 
-    #[test]
-    fn test_save_and_get_top_k() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "first", 100, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e2", "second", 200, kind::SNAPSHOT))
-            .unwrap();
-        storage
-            .save(&make_entry("e3", "third", 300, kind::SUMMARY))
-            .unwrap();
+    #[tokio::test]
+    async fn test_save_and_get_top_k() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "first", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "second", 200, kind::SNAPSHOT)).await.unwrap();
+        storage.save(&make_entry("e3", "third", 300, kind::SUMMARY)).await.unwrap();
 
-        let top2 = storage.get_top_k(2).unwrap();
+        let top2 = storage.get_top_k(2).await.unwrap();
         assert_eq!(top2.len(), 2);
         assert_eq!(top2[0].id, "e3"); // most recent
         assert_eq!(top2[1].id, "e2");
     }
 
-    #[test]
-    fn test_save_and_get_all() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "first", 100, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e2", "second", 200, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e3", "third", 300, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn test_save_and_get_all() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "first", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "second", 200, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e3", "third", 300, kind::MANUAL)).await.unwrap();
 
-        let all = storage.get_all().unwrap();
+        let all = storage.get_all().await.unwrap();
         assert_eq!(all.len(), 3);
-        // ordered by timestamp desc
         assert_eq!(all[0].id, "e3");
         assert_eq!(all[1].id, "e2");
         assert_eq!(all[2].id, "e1");
     }
 
-    #[test]
-    fn test_delete() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "hello", 1000, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn test_delete() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "hello", 1000, kind::MANUAL)).await.unwrap();
 
-        assert!(storage.delete("e1").unwrap());
-        assert!(!storage.delete("nonexistent").unwrap());
-        assert_eq!(storage.count().unwrap(), 0);
+        assert!(storage.delete("e1").await.unwrap());
+        assert!(!storage.delete("nonexistent").await.unwrap());
+        assert_eq!(storage.count().await.unwrap(), 0);
     }
 
-    #[test]
-    fn test_clear() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "a", 100, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e2", "b", 200, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e3", "c", 300, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn test_clear() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "a", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "b", 200, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e3", "c", 300, kind::MANUAL)).await.unwrap();
 
-        let cleared = storage.clear().unwrap();
+        let cleared = storage.clear().await.unwrap();
         assert_eq!(cleared, 3);
-        assert_eq!(storage.count().unwrap(), 0);
+        assert_eq!(storage.count().await.unwrap(), 0);
     }
 
-    #[test]
-    fn test_clear_scope() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_scoped_entry("e1", "a", 100, "scope-a"))
-            .unwrap();
-        storage
-            .save(&make_scoped_entry("e2", "b", 200, "scope-a"))
-            .unwrap();
-        storage
-            .save(&make_scoped_entry("e3", "c", 300, "scope-b"))
-            .unwrap();
+    #[tokio::test]
+    async fn test_clear_scope() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_scoped_entry("e1", "a", 100, "scope-a")).await.unwrap();
+        storage.save(&make_scoped_entry("e2", "b", 200, "scope-a")).await.unwrap();
+        storage.save(&make_scoped_entry("e3", "c", 300, "scope-b")).await.unwrap();
 
-        let cleared = storage.clear_scope("scope-a").unwrap();
+        let cleared = storage.clear_scope("scope-a").await.unwrap();
         assert_eq!(cleared, 2);
-        assert_eq!(storage.count().unwrap(), 1);
+        assert_eq!(storage.count().await.unwrap(), 1);
 
-        let all = storage.get_all().unwrap();
+        let all = storage.get_all().await.unwrap();
         assert_eq!(all[0].id, "e3");
     }
 
-    #[test]
-    fn test_clear_scope_no_match() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_scoped_entry("e1", "a", 100, "scope-a"))
-            .unwrap();
+    #[tokio::test]
+    async fn test_clear_scope_no_match() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_scoped_entry("e1", "a", 100, "scope-a")).await.unwrap();
 
-        let cleared = storage.clear_scope("scope-z").unwrap();
+        let cleared = storage.clear_scope("scope-z").await.unwrap();
         assert_eq!(cleared, 0);
-        assert_eq!(storage.count().unwrap(), 1);
+        assert_eq!(storage.count().await.unwrap(), 1);
     }
 
-    #[test]
-    fn test_lru_eviction() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 2).unwrap();
-        storage
-            .save(&make_entry("e1", "oldest", 100, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e2", "middle", 200, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e3", "newest", 300, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn test_lru_eviction() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 2).await.unwrap();
+        storage.save(&make_entry("e1", "oldest", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "middle", 200, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e3", "newest", 300, kind::MANUAL)).await.unwrap();
 
-        assert_eq!(storage.count().unwrap(), 2);
+        assert_eq!(storage.count().await.unwrap(), 2);
 
-        let all = storage.get_all().unwrap();
+        let all = storage.get_all().await.unwrap();
         let ids: Vec<&str> = all.iter().map(|e| e.id.as_str()).collect();
-        assert!(
-            !ids.contains(&"e1"),
-            "oldest entry should have been evicted"
-        );
+        assert!(!ids.contains(&"e1"), "oldest entry should have been evicted");
         assert!(ids.contains(&"e2"));
         assert!(ids.contains(&"e3"));
     }
 
-    #[test]
-    fn test_fts_search() {
-        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry(
-                "e1",
-                "rust programming language",
-                100,
-                kind::MANUAL,
-            ))
-            .unwrap();
-        storage
-            .save(&make_entry("e2", "python scripting", 200, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e3", "rust borrow checker", 300, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn test_fts_search() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "rust programming language", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "python scripting", 200, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e3", "rust borrow checker", 300, kind::MANUAL)).await.unwrap();
 
-        let results = searcher.search("rust", None, 5).unwrap();
+        let results = searcher.search("rust", None, 5).await.unwrap();
         assert_eq!(results.len(), 2);
-        // Assert ordering by relevance (highest score first), not absolute values.
         assert!(
             results[0].score >= results[1].score,
             "results should be ordered by descending score"
         );
     }
 
-    #[test]
-    fn test_fts_search_no_results() {
-        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "hello world", 100, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn test_fts_search_no_results() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "hello world", 100, kind::MANUAL)).await.unwrap();
 
-        let results = searcher.search("nonexistent", None, 5).unwrap();
+        let results = searcher.search("nonexistent", None, 5).await.unwrap();
         assert!(results.is_empty());
     }
 
-    #[test]
-    fn test_fts_search_scoped() {
-        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_scoped_entry("e1", "rust programming", 100, "a"))
-            .unwrap();
-        storage
-            .save(&make_scoped_entry("e2", "rust borrow checker", 200, "b"))
-            .unwrap();
+    #[tokio::test]
+    async fn test_fts_search_scoped() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_scoped_entry("e1", "rust programming", 100, "a")).await.unwrap();
+        storage.save(&make_scoped_entry("e2", "rust borrow checker", 200, "b")).await.unwrap();
 
-        let results_a = searcher.search("rust", Some("a"), 5).unwrap();
+        let results_a = searcher.search("rust", Some("a"), 5).await.unwrap();
         assert_eq!(results_a.len(), 1);
         assert_eq!(results_a[0].entry.id, "e1");
 
-        let results_b = searcher.search("rust", Some("b"), 5).unwrap();
+        let results_b = searcher.search("rust", Some("b"), 5).await.unwrap();
         assert_eq!(results_b.len(), 1);
         assert_eq!(results_b[0].entry.id, "e2");
 
-        let results_all = searcher.search("rust", None, 5).unwrap();
+        let results_all = searcher.search("rust", None, 5).await.unwrap();
         assert_eq!(results_all.len(), 2);
     }
 
@@ -604,8 +570,8 @@ mod tests {
         let _ = fs::remove_file(&db_path);
     }
 
-    #[test]
-    fn test_v2_to_v3_migration() {
+    #[tokio::test]
+    async fn test_v2_to_v3_migration() {
         let db_path = temp_db_path("v2-to-v3");
 
         {
@@ -663,7 +629,7 @@ mod tests {
         let storage = SqliteStorage::open(&db_path, 100).unwrap();
 
         // entries preserved
-        let all = storage.get_all().unwrap();
+        let all = storage.get_all().await.unwrap();
         assert_eq!(all.len(), 2);
 
         // kinds remapped: 'Auto' -> 'summary', 'Manual' -> 'manual'
@@ -692,8 +658,8 @@ mod tests {
         assert_eq!(auto_entry.token_count, Some(4));
 
         // FTS query still matches content
-        let (_, searcher) = open_storage(&db_path, 100).unwrap();
-        let results = searcher.search("runtime metadata", None, 10).unwrap();
+        let (_, searcher) = open_storage(&db_path, 100).await.unwrap();
+        let results = searcher.search("runtime metadata", None, 10).await.unwrap();
         assert!(
             results.iter().any(|r| r.entry.id == "a1"),
             "FTS search should still find the migrated entry's content"
@@ -722,9 +688,9 @@ mod tests {
         let _ = fs::remove_file(&db_path);
     }
 
-    #[test]
-    fn test_new_entry_with_scope_and_metadata() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
+    #[tokio::test]
+    async fn test_new_entry_with_scope_and_metadata() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
 
         let metadata = serde_json::json!({"runtime": "codex", "model": "gpt-5.3-codex"});
         let entry = ContextEntry {
@@ -738,9 +704,9 @@ mod tests {
             metadata: Some(metadata.clone()),
         };
 
-        storage.save(&entry).unwrap();
+        storage.save(&entry).await.unwrap();
 
-        let all = storage.get_all().unwrap();
+        let all = storage.get_all().await.unwrap();
         assert_eq!(all.len(), 1);
         let got = &all[0];
         assert_eq!(got.id, entry.id);
@@ -753,36 +719,26 @@ mod tests {
         assert_eq!(got.metadata, Some(metadata));
     }
 
-    #[test]
-    fn test_insert_or_replace() {
-        let (storage, _) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "original content", 100, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e1", "updated content", 200, kind::SUMMARY))
-            .unwrap();
+    #[tokio::test]
+    async fn test_insert_or_replace() {
+        let (storage, _) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "original content", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e1", "updated content", 200, kind::SUMMARY)).await.unwrap();
 
-        assert_eq!(storage.count().unwrap(), 1);
+        assert_eq!(storage.count().await.unwrap(), 1);
 
-        let all = storage.get_all().unwrap();
+        let all = storage.get_all().await.unwrap();
         assert_eq!(all[0].content, "updated content");
     }
 
-    #[test]
-    fn test_search_match_all_query() {
-        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "first entry", 100, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e2", "second entry", 200, kind::SNAPSHOT))
-            .unwrap();
-        storage
-            .save(&make_entry("e3", "third entry", 300, kind::SUMMARY))
-            .unwrap();
+    #[tokio::test]
+    async fn test_search_match_all_query() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "first entry", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "second entry", 200, kind::SNAPSHOT)).await.unwrap();
+        storage.save(&make_entry("e3", "third entry", 300, kind::SUMMARY)).await.unwrap();
 
-        let results = searcher.search(MATCH_ALL_QUERY, None, 10).unwrap();
+        let results = searcher.search(MATCH_ALL_QUERY, None, 10).await.unwrap();
         assert_eq!(results.len(), 3);
 
         // Ordered by timestamp descending (newest first).
@@ -796,34 +752,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_search_match_all_query_scoped() {
-        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_scoped_entry("e1", "first entry", 100, "a"))
-            .unwrap();
-        storage
-            .save(&make_scoped_entry("e2", "second entry", 200, "b"))
-            .unwrap();
+    #[tokio::test]
+    async fn test_search_match_all_query_scoped() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_scoped_entry("e1", "first entry", 100, "a")).await.unwrap();
+        storage.save(&make_scoped_entry("e2", "second entry", 200, "b")).await.unwrap();
 
-        let results_a = searcher.search(MATCH_ALL_QUERY, Some("a"), 10).unwrap();
+        let results_a = searcher.search(MATCH_ALL_QUERY, Some("a"), 10).await.unwrap();
         assert_eq!(results_a.len(), 1);
         assert_eq!(results_a[0].entry.id, "e1");
 
-        let results_all = searcher.search(MATCH_ALL_QUERY, None, 10).unwrap();
+        let results_all = searcher.search(MATCH_ALL_QUERY, None, 10).await.unwrap();
         assert_eq!(results_all.len(), 2);
     }
 
-    #[test]
-    fn search_with_fts5_operator_characters_does_not_error() {
-        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "marco polo", 100, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn search_with_fts5_operator_characters_does_not_error() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "marco polo", 100, kind::MANUAL)).await.unwrap();
 
         // Production bug: a query containing `"` and `.` previously caused
         // `fts5: syntax error`. It must now succeed and find the entry.
-        let results = searcher.search(r#"if I say "marco"."#, None, 10).unwrap();
+        let results = searcher.search(r#"if I say "marco"."#, None, 10).await.unwrap();
 
         assert!(
             results.iter().any(|r| r.entry.id == "e1"),
@@ -831,19 +781,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn search_or_joins_terms_for_message_length_queries() {
-        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).unwrap();
-        storage
-            .save(&make_entry("e1", "alpha one", 100, kind::MANUAL))
-            .unwrap();
-        storage
-            .save(&make_entry("e2", "beta two", 200, kind::MANUAL))
-            .unwrap();
+    #[tokio::test]
+    async fn search_or_joins_terms_for_message_length_queries() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "alpha one", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "beta two", 200, kind::MANUAL)).await.unwrap();
 
         // Under implicit AND, no entry contains all of "alpha", "beta", and
         // "gamma", so this would return zero results. OR-join must return both.
-        let results = searcher.search("alpha beta gamma", None, 10).unwrap();
+        let results = searcher.search("alpha beta gamma", None, 10).await.unwrap();
 
         let ids: Vec<&str> = results.iter().map(|r| r.entry.id.as_str()).collect();
         assert!(ids.contains(&"e1"), "expected 'alpha one' entry in results");

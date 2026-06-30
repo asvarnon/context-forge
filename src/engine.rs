@@ -90,13 +90,13 @@ impl ContextEngine {
     /// # Errors
     ///
     /// Returns an error if the underlying search fails.
-    pub fn assemble(
+    pub async fn assemble(
         &self,
         query: &str,
         scope: Option<&str>,
         token_budget: usize,
     ) -> Result<Vec<ContextEntry>> {
-        let candidates = self.searcher.search(query, scope, DEFAULT_SEARCH_LIMIT)?;
+        let candidates = self.searcher.search(query, scope, DEFAULT_SEARCH_LIMIT).await?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -159,7 +159,7 @@ impl ContextEngine {
     ///
     /// Returns [`Error::InvalidEntry`] if `content` is empty, or propagates
     /// any error from the underlying storage write.
-    pub fn save_snapshot(
+    pub async fn save_snapshot(
         &self,
         content: &str,
         kind: &str,
@@ -184,7 +184,7 @@ impl ContextEngine {
             metadata: options.metadata.clone(),
         };
 
-        self.storage.save(&entry)?;
+        self.storage.save(&entry).await?;
 
         Ok(id)
     }
@@ -214,6 +214,7 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use crate::config::{EvictionPolicy, DEFAULT_RECENCY_HALF_LIFE_SECS};
     use crate::entry::ScoredEntry;
     use std::path::PathBuf;
@@ -235,13 +236,14 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ContextStorage for MockStorage {
-        fn save(&self, entry: &ContextEntry) -> Result<()> {
+        async fn save(&self, entry: &ContextEntry) -> Result<()> {
             self.entries.lock().unwrap().push(entry.clone());
             Ok(())
         }
 
-        fn get_top_k(&self, k: usize) -> Result<Vec<ContextEntry>> {
+        async fn get_top_k(&self, k: usize) -> Result<Vec<ContextEntry>> {
             let guard = self.entries.lock().unwrap();
             let mut sorted = guard.clone();
             sorted.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
@@ -249,32 +251,32 @@ mod tests {
             Ok(sorted)
         }
 
-        fn get_all(&self) -> Result<Vec<ContextEntry>> {
+        async fn get_all(&self) -> Result<Vec<ContextEntry>> {
             Ok(self.entries.lock().unwrap().clone())
         }
 
-        fn delete(&self, id: &str) -> Result<bool> {
+        async fn delete(&self, id: &str) -> Result<bool> {
             let mut guard = self.entries.lock().unwrap();
             let before = guard.len();
             guard.retain(|e| e.id != id);
             Ok(guard.len() < before)
         }
 
-        fn clear(&self) -> Result<usize> {
+        async fn clear(&self) -> Result<usize> {
             let mut guard = self.entries.lock().unwrap();
             let n = guard.len();
             guard.clear();
             Ok(n)
         }
 
-        fn clear_scope(&self, scope: &str) -> Result<usize> {
+        async fn clear_scope(&self, scope: &str) -> Result<usize> {
             let mut guard = self.entries.lock().unwrap();
             let before = guard.len();
             guard.retain(|e| e.scope.as_deref() != Some(scope));
             Ok(before - guard.len())
         }
 
-        fn count(&self) -> Result<usize> {
+        async fn count(&self) -> Result<usize> {
             Ok(self.entries.lock().unwrap().len())
         }
     }
@@ -295,8 +297,9 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Searcher for MockSearcher {
-        fn search(
+        async fn search(
             &self,
             _query: &str,
             _scope: Option<&str>,
@@ -360,8 +363,8 @@ mod tests {
         assert_send_sync::<ContextEngine>();
     }
 
-    #[test]
-    fn test_assemble_fits_budget() {
+    #[tokio::test]
+    async fn test_assemble_fits_budget() {
         let now = current_timestamp();
         let results = vec![
             make_scored("a", "short", now, 1.0),
@@ -376,17 +379,17 @@ mod tests {
         );
 
         // Budget of 2 tokens: "short" = 2 tokens fits exactly.
-        let assembled = engine.assemble("test", None, 2).unwrap();
+        let assembled = engine.assemble("test", None, 2).await.unwrap();
         assert_eq!(assembled.len(), 1);
         assert_eq!(assembled[0].id, "a");
 
         // Budget large enough for all.
-        let assembled = engine.assemble("test", None, 1000).unwrap();
+        let assembled = engine.assemble("test", None, 1000).await.unwrap();
         assert_eq!(assembled.len(), 3);
     }
 
-    #[test]
-    fn test_assemble_skips_oversized_entries() {
+    #[tokio::test]
+    async fn test_assemble_skips_oversized_entries() {
         // B1 regression: oversized top-ranked entry must not abort the loop.
         let now = current_timestamp();
         let big_content = "x".repeat(4000); // 1000 tokens
@@ -402,24 +405,24 @@ mod tests {
         );
 
         // Budget = 5: "big" (1000 tokens) is skipped, "fits" (1 token) is returned.
-        let assembled = engine.assemble("test", None, 5).unwrap();
+        let assembled = engine.assemble("test", None, 5).await.unwrap();
         assert_eq!(assembled.len(), 1);
         assert_eq!(assembled[0].id, "small");
     }
 
-    #[test]
-    fn test_assemble_empty_results() {
+    #[tokio::test]
+    async fn test_assemble_empty_results() {
         let engine = ContextEngine::new(
             Box::new(MockStorage::new()),
             Box::new(MockSearcher::empty()),
             default_config(100),
         );
-        let assembled = engine.assemble("anything", None, 1000).unwrap();
+        let assembled = engine.assemble("anything", None, 1000).await.unwrap();
         assert!(assembled.is_empty());
     }
 
-    #[test]
-    fn test_recency_weighting() {
+    #[tokio::test]
+    async fn test_recency_weighting() {
         let now = current_timestamp();
         // Two entries with equal BM25 scores but different timestamps.
         let results = vec![
@@ -433,15 +436,15 @@ mod tests {
             default_config(100),
         );
 
-        let assembled = engine.assemble("test", None, 1000).unwrap();
+        let assembled = engine.assemble("test", None, 1000).await.unwrap();
         assert_eq!(assembled.len(), 2);
         // Newer entry should rank first due to higher recency score.
         assert_eq!(assembled[0].id, "new");
         assert_eq!(assembled[1].id, "old");
     }
 
-    #[test]
-    fn test_save_snapshot_creates_entry() {
+    #[tokio::test]
+    async fn test_save_snapshot_creates_entry() {
         let engine = ContextEngine::new(
             Box::new(MockStorage::new()),
             Box::new(MockSearcher::empty()),
@@ -454,11 +457,12 @@ mod tests {
                 crate::entry::kind::MANUAL,
                 &SaveOptions::default(),
             )
+            .await
             .unwrap();
         assert!(!id.is_empty());
 
         // Verify the entry exists in storage.
-        let all = engine.storage.get_all().unwrap();
+        let all = engine.storage.get_all().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, id);
         assert_eq!(all[0].content, "hello world");
@@ -466,8 +470,8 @@ mod tests {
         assert_eq!(all[0].kind, crate::entry::kind::MANUAL);
     }
 
-    #[test]
-    fn test_save_snapshot_populates_scope_and_metadata() {
+    #[tokio::test]
+    async fn test_save_snapshot_populates_scope_and_metadata() {
         let engine = ContextEngine::new(
             Box::new(MockStorage::new()),
             Box::new(MockSearcher::empty()),
@@ -483,9 +487,10 @@ mod tests {
 
         let id = engine
             .save_snapshot("hello scoped", crate::entry::kind::SNAPSHOT, &options)
+            .await
             .unwrap();
 
-        let all = engine.storage.get_all().unwrap();
+        let all = engine.storage.get_all().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, id);
         assert_eq!(all[0].kind, crate::entry::kind::SNAPSHOT);
@@ -511,8 +516,8 @@ mod tests {
         assert!((decay_double - 0.25).abs() < 1e-10);
     }
 
-    #[test]
-    fn test_save_snapshot_ids_are_unique() {
+    #[tokio::test]
+    async fn test_save_snapshot_ids_are_unique() {
         let engine = ContextEngine::new(
             Box::new(MockStorage::new()),
             Box::new(MockSearcher::empty()),
@@ -525,6 +530,7 @@ mod tests {
                 crate::entry::kind::SNAPSHOT,
                 &SaveOptions::default(),
             )
+            .await
             .unwrap();
         let id2 = engine
             .save_snapshot(
@@ -532,6 +538,7 @@ mod tests {
                 crate::entry::kind::SNAPSHOT,
                 &SaveOptions::default(),
             )
+            .await
             .unwrap();
         assert_ne!(
             id1, id2,
@@ -539,15 +546,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_save_empty_content_rejected() {
+    #[tokio::test]
+    async fn test_save_empty_content_rejected() {
         let engine = ContextEngine::new(
             Box::new(MockStorage::new()),
             Box::new(MockSearcher::empty()),
             default_config(100),
         );
 
-        let result = engine.save_snapshot("", crate::entry::kind::MANUAL, &SaveOptions::default());
+        let result = engine
+            .save_snapshot("", crate::entry::kind::MANUAL, &SaveOptions::default())
+            .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("content must not be empty"));

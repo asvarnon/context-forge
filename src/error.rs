@@ -6,13 +6,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// An error from the underlying `SQLite` database.
+    /// An error from the underlying Turso database.
     #[error("storage error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
-    /// An error obtaining a connection from the connection pool.
-    #[error("connection pool error: {0}")]
-    Pool(#[from] r2d2::Error),
+    Turso(#[from] turso::Error),
 
     /// An entry failed validation.
     #[error("invalid entry: {0}")]

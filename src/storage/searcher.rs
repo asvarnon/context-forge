@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
@@ -8,6 +9,9 @@ use crate::entry::ScoredEntry;
 use crate::storage::schema::row_to_entry;
 use crate::traits::Searcher;
 use crate::Result;
+
+fn re(e: rusqlite::Error) -> crate::Error { crate::Error::Migration(e.to_string()) }
+fn pe(e: r2d2::Error) -> crate::Error { crate::Error::Migration(e.to_string()) }
 
 /// FTS5-backed full-text search over stored context entries.
 pub struct SqliteSearcher {
@@ -20,37 +24,82 @@ impl SqliteSearcher {
     pub fn new(pool: Arc<Pool<SqliteConnectionManager>>) -> Self {
         Self { pool }
     }
+}
 
-    /// Return all entries (optionally restricted to `scope`) with a fixed
-    /// score of `1.0`, ordered by timestamp descending.
-    ///
-    /// This implements the `MATCH_ALL_QUERY` contract without relying on FTS5
-    /// MATCH, which does not support a bare `*` glob. A fixed score keeps the
-    /// scale consistent with the BM25 path's "higher = better" convention;
-    /// the engine's recency decay (monotonic in age) preserves ordering.
-    fn search_all(&self, scope: Option<&str>, limit: usize) -> Result<Vec<ScoredEntry>> {
-        let conn = self.pool.get()?;
+fn search_all_sync(
+    pool: Arc<Pool<SqliteConnectionManager>>,
+    scope: Option<String>,
+    limit: usize,
+) -> crate::Result<Vec<ScoredEntry>> {
+    let conn = pool.get().map_err(pe)?;
 
-        let mut stmt = conn.prepare(
+    let mut stmt = conn
+        .prepare(
             "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata \
              FROM entries \
              WHERE (?1 IS NULL OR scope = ?1) \
              ORDER BY timestamp DESC \
              LIMIT ?2",
-        )?;
+        )
+        .map_err(re)?;
 
-        let results = stmt
-            .query_map(
-                rusqlite::params![scope, i64::try_from(limit).unwrap_or(i64::MAX)],
-                |row| {
-                    let entry = row_to_entry(row)?;
-                    Ok(ScoredEntry { score: 1.0, entry })
-                },
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+    let results = stmt
+        .query_map(
+            rusqlite::params![scope.as_deref(), i64::try_from(limit).unwrap_or(i64::MAX)],
+            |row| {
+                let entry = row_to_entry(row)?;
+                Ok(ScoredEntry { score: 1.0, entry })
+            },
+        )
+        .map_err(re)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(re)?;
 
-        Ok(results)
-    }
+    Ok(results)
+}
+
+fn search_fts_sync(
+    pool: Arc<Pool<SqliteConnectionManager>>,
+    match_expr: String,
+    scope: Option<String>,
+    limit: usize,
+) -> crate::Result<Vec<ScoredEntry>> {
+    let conn = pool.get().map_err(pe)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.id, e.content, e.timestamp, e.kind, e.scope, e.session_id, \
+                    e.token_count, e.metadata, bm25(entries_fts) AS score \
+             FROM entries_fts f \
+             JOIN entries e ON e.rowid = f.rowid \
+             WHERE entries_fts MATCH ?1 AND (?2 IS NULL OR e.scope = ?2) \
+             ORDER BY score \
+             LIMIT ?3",
+        )
+        .map_err(re)?;
+
+    let results = stmt
+        .query_map(
+            rusqlite::params![
+                match_expr,
+                scope.as_deref(),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                let entry = row_to_entry(row)?;
+                let raw_score: f64 = row.get("score")?;
+                Ok(ScoredEntry {
+                    entry,
+                    // bm25() returns negative values; negate so higher = more relevant.
+                    score: -raw_score,
+                })
+            },
+        )
+        .map_err(re)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(re)?;
+
+    Ok(results)
 }
 
 /// Convert an arbitrary natural-language string into a safe FTS5 `MATCH`
@@ -76,45 +125,26 @@ fn to_fts5_match(query: &str) -> Option<String> {
     }
 }
 
+#[async_trait]
 impl Searcher for SqliteSearcher {
-    fn search(&self, query: &str, scope: Option<&str>, limit: usize) -> Result<Vec<ScoredEntry>> {
+    async fn search(&self, query: &str, scope: Option<&str>, limit: usize) -> Result<Vec<ScoredEntry>> {
         if query == MATCH_ALL_QUERY {
-            return self.search_all(scope, limit);
+            let pool = Arc::clone(&self.pool);
+            let scope = scope.map(str::to_owned);
+            return tokio::task::spawn_blocking(move || search_all_sync(pool, scope, limit))
+                .await
+                .map_err(|e| crate::Error::Migration(e.to_string()))?;
         }
 
         let Some(match_expr) = to_fts5_match(query) else {
             return Ok(Vec::new());
         };
 
-        let conn = self.pool.get()?;
-
-        let mut stmt = conn.prepare(
-            "SELECT e.id, e.content, e.timestamp, e.kind, e.scope, e.session_id, \
-                    e.token_count, e.metadata, bm25(entries_fts) AS score \
-             FROM entries_fts f \
-             JOIN entries e ON e.rowid = f.rowid \
-             WHERE entries_fts MATCH ?1 AND (?2 IS NULL OR e.scope = ?2) \
-             ORDER BY score \
-             LIMIT ?3",
-        )?;
-
-        let results = stmt
-            .query_map(
-                rusqlite::params![match_expr, scope, i64::try_from(limit).unwrap_or(i64::MAX)],
-                |row| {
-                    let entry = row_to_entry(row)?;
-                    let raw_score: f64 = row.get("score")?;
-
-                    Ok(ScoredEntry {
-                        entry,
-                        // bm25() returns negative values; negate so higher = more relevant.
-                        score: -raw_score,
-                    })
-                },
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
+        let pool = Arc::clone(&self.pool);
+        let scope = scope.map(str::to_owned);
+        tokio::task::spawn_blocking(move || search_fts_sync(pool, match_expr, scope, limit))
+            .await
+            .map_err(|e| crate::Error::Migration(e.to_string()))?
     }
 }
 

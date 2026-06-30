@@ -214,6 +214,8 @@ INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 3);
 COMMIT;
 ";
 
+fn me(e: rusqlite::Error) -> crate::Error { crate::Error::Migration(e.to_string()) }
+
 /// Run database migrations up to the latest schema version.
 ///
 /// This function is idempotent — calling it multiple times on the same
@@ -223,29 +225,32 @@ COMMIT;
 ///
 /// Returns an error if any migration statement fails to execute.
 pub fn migrate(conn: &Connection) -> Result<()> {
-    conn.execute_batch(CREATE_SCHEMA_VERSION)?;
+    conn.execute_batch(CREATE_SCHEMA_VERSION).map_err(me)?;
 
-    let version: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-        [],
-        |row| row.get(0),
-    )?;
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(me)?;
 
     if version < 1 {
-        conn.execute_batch(SCHEMA_V1)?;
+        conn.execute_batch(SCHEMA_V1).map_err(me)?;
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 1)",
             [],
-        )?;
+        )
+        .map_err(me)?;
     }
 
     if version < 2 {
-        conn.execute_batch(SCHEMA_V2)?;
+        conn.execute_batch(SCHEMA_V2).map_err(me)?;
     }
 
     if version < 3 {
-        conn.execute_batch(SCHEMA_V3)?;
+        conn.execute_batch(SCHEMA_V3).map_err(me)?;
     }
 
     Ok(())
