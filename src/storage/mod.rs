@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+/// Shared in-memory tantivy FTS index.
+pub(crate) mod fts_index;
 /// Turso-backed async storage implementation.
 pub mod turso_storage;
 /// Turso-backed async FTS searcher.
@@ -20,7 +22,8 @@ pub async fn open_storage(
 ) -> crate::Result<(TursoStorage, TursoSearcher)> {
     let storage = TursoStorage::open(db_path, max_entries).await?;
     let db = Arc::clone(&storage.db);
-    let searcher = TursoSearcher::new(db);
+    let fts = Arc::clone(&storage.fts);
+    let searcher = TursoSearcher::new(db, fts);
     Ok((storage, searcher))
 }
 

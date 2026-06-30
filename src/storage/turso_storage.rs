@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::entry::ContextEntry;
+use crate::storage::fts_index::FtsIndex;
 use crate::traits::ContextStorage;
 
 const TURSO_SCHEMA: &str = r"
@@ -28,11 +29,15 @@ CREATE INDEX IF NOT EXISTS idx_entries_session_id ON entries(session_id);
 /// Turso-backed implementation of [`crate::traits::ContextStorage`].
 pub struct TursoStorage {
     pub(crate) db: Arc<turso::Database>,
+    pub(crate) fts: Arc<FtsIndex>,
     max_entries: usize,
 }
 
 impl TursoStorage {
     /// Open (or create) a turso database at `db_path` and run migrations.
+    ///
+    /// Rebuilds the in-memory tantivy FTS index from all existing entries so
+    /// BM25 corpus statistics are accurate from the first query.
     ///
     /// # Errors
     ///
@@ -48,8 +53,31 @@ impl TursoStorage {
         let conn = db.connect()?;
         conn.busy_timeout(Duration::from_secs(5))?;
         turso_migrate(&conn).await?;
+
+        // Rebuild tantivy index from all existing entries.
+        let fts = FtsIndex::new()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, content FROM entries",
+                (),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let id = match row.get_value(0)? {
+                turso::Value::Text(s) => s,
+                _ => continue,
+            };
+            let content = match row.get_value(1)? {
+                turso::Value::Text(s) => s,
+                _ => continue,
+            };
+            fts.add(&id, &content)?;
+        }
+        fts.commit()?;
+
         Ok(Self {
             db: Arc::new(db),
+            fts,
             max_entries,
         })
     }
@@ -216,7 +244,13 @@ impl ContextStorage for TursoStorage {
 
         if result.is_err() {
             let _ = conn.execute("ROLLBACK", ()).await;
+            return result;
         }
+
+        // Turso write committed — update tantivy. If this fails the entry is
+        // still persisted in turso; next startup rebuild will re-sync the index.
+        self.fts.add(&entry.id, &entry.content)?;
+        self.fts.commit()?;
 
         result
     }
@@ -267,6 +301,9 @@ impl ContextStorage for TursoStorage {
             .execute("DELETE FROM entries WHERE id = ?1", (id.to_owned(),))
             .await?;
 
+        if affected > 0 {
+            self.fts.remove(id)?;
+        }
         Ok(affected > 0)
     }
 
@@ -275,12 +312,27 @@ impl ContextStorage for TursoStorage {
         conn.busy_timeout(Duration::from_secs(5))?;
 
         let affected = conn.execute("DELETE FROM entries", ()).await?;
+        self.fts.clear()?;
         Ok(affected as usize)
     }
 
     async fn clear_scope(&self, scope: &str) -> crate::Result<usize> {
         let conn = self.db.connect()?;
         conn.busy_timeout(Duration::from_secs(5))?;
+
+        // Collect the ids being deleted so we can remove them from tantivy.
+        let mut id_rows = conn
+            .query(
+                "SELECT id FROM entries WHERE scope = ?1",
+                (scope.to_owned(),),
+            )
+            .await?;
+        let mut ids: Vec<String> = Vec::new();
+        while let Some(row) = id_rows.next().await? {
+            if let turso::Value::Text(id) = row.get_value(0)? {
+                ids.push(id);
+            }
+        }
 
         let affected = conn
             .execute(
@@ -289,6 +341,9 @@ impl ContextStorage for TursoStorage {
             )
             .await?;
 
+        for id in &ids {
+            self.fts.remove(id)?;
+        }
         Ok(affected as usize)
     }
 

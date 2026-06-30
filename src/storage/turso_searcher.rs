@@ -2,41 +2,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tantivy::collector::TopDocs;
+use tantivy::query::QueryParser;
+use tantivy::schema::OwnedValue;
+use tantivy::TantivyDocument;
 
 use crate::engine::MATCH_ALL_QUERY;
 use crate::entry::ScoredEntry;
+use crate::storage::fts_index::FtsIndex;
 use crate::storage::turso_storage::turso_row_to_entry;
 use crate::traits::Searcher;
 
-/// Turso-backed full-text searcher (tantivy FTS index via `USING fts`).
+/// Turso-backed searcher using a standalone tantivy index for real BM25 scoring.
+///
+/// On FTS queries: tantivy returns scored IDs → turso fetches full rows by ID.
+/// On match-all: SQL ORDER BY timestamp DESC (no scoring needed).
 pub struct TursoSearcher {
     db: Arc<turso::Database>,
+    fts: Arc<FtsIndex>,
 }
 
 impl TursoSearcher {
-    /// Create a new searcher sharing the given turso database handle.
+    /// Create a new searcher sharing the given turso database and tantivy index.
     #[must_use]
-    pub fn new(db: Arc<turso::Database>) -> Self {
-        Self { db }
-    }
-}
-
-// Converts a raw user query into a Tantivy-compatible query string.
-// Splits on non-alphanumeric chars, wraps each term in double quotes (phrase query),
-// and joins with OR. Returns None if the query has no alphanumeric terms.
-// The resulting format — `"term1" OR "term2"` — is valid for both FTS5 and
-// Tantivy's QueryParser, which turso uses under the hood.
-fn to_fts5_match(query: &str) -> Option<String> {
-    let terms: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|term| !term.is_empty())
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect();
-
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" OR "))
+    pub(crate) fn new(db: Arc<turso::Database>, fts: Arc<FtsIndex>) -> Self {
+        Self { db, fts }
     }
 }
 
@@ -52,56 +42,84 @@ impl Searcher for TursoSearcher {
             return self.search_all(scope, limit).await;
         }
 
-        let Some(match_expr) = to_fts5_match(query) else {
-            return Ok(Vec::new());
+        // --- tantivy BM25 search ---
+        let searcher = self.fts.reader.searcher();
+        // parse_query_lenient: OR-joins terms by default and never errors on bad syntax.
+        let (tantivy_query, _errors) =
+            QueryParser::for_index(searcher.index(), vec![self.fts.content_field])
+                .parse_query_lenient(query);
+
+        let limit_for_tantivy = if scope.is_some() {
+            // Over-fetch when scope filtering in Rust; cap at a reasonable ceiling.
+            (limit * 10).max(100)
+        } else {
+            limit
         };
+
+        let top_docs = searcher
+            .search(&tantivy_query, &TopDocs::with_limit(limit_for_tantivy))
+            .map_err(|e| crate::Error::Migration(e.to_string()))?;
+
+        if top_docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Collect (score, id) pairs from the tantivy index.
+        let mut scored_ids: Vec<(f32, String)> = Vec::with_capacity(top_docs.len());
+        for (score, doc_address) in top_docs {
+            let doc: TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| crate::Error::Migration(e.to_string()))?;
+            if let Some(OwnedValue::Str(id_str)) = doc.get_first(self.fts.id_field) {
+                scored_ids.push((score, id_str.to_owned()));
+            }
+        }
+
+        if scored_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fetch full rows from turso by ID.
+        // IDs are UUID v7 strings generated internally — safe to inline directly.
+        let id_list: String = scored_ids
+            .iter()
+            .map(|(_, id)| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata \
+             FROM entries WHERE id IN ({id_list})"
+        );
 
         let conn = self.db.connect()?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        let scope_owned = scope.map(str::to_owned);
 
-        // fts_score(content, ?1) occupies column 8. It returns a real BM25 value when
-        // the optimizer routes the query through the Tantivy index scan; otherwise it
-        // returns 0.0 (corpus-level IDF statistics are only available inside that scan
-        // context — fts_score has no per-row fallback the way fts_match does).
-        // Scope filtering is done in Rust so the WHERE clause stays simple enough for
-        // the optimizer to potentially recognize the fts_score + fts_match pattern.
-        let mut rows = conn
-            .query(
-                "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata, \
-                 fts_score(content, ?1) AS score \
-                 FROM entries \
-                 WHERE fts_match(content, ?1) \
-                 ORDER BY score DESC \
-                 LIMIT ?2",
-                (
-                    match_expr,
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                ),
-            )
-            .await?;
-
-        let mut result = Vec::new();
+        let mut rows = conn.query(&sql, ()).await?;
+        let mut id_to_entry = std::collections::HashMap::new();
         while let Some(row) = rows.next().await? {
             let entry = turso_row_to_entry(&row)?;
-            // Apply scope filter in Rust: the SQL WHERE omits it so the query pattern
-            // stays closer to what the optimizer recognizes for fts_score.
-            if scope_owned.is_some() && entry.scope.as_deref() != scope_owned.as_deref() {
-                continue;
-            }
-            let score = match row.get_value(8)? {
-                turso::Value::Real(f) => f,
-                turso::Value::Integer(i) => i as f64,
-                turso::Value::Null => 0.0,
-                other => {
-                    return Err(crate::Error::Migration(format!(
-                        "fts_score: unexpected value type {other:?}"
-                    )))
-                }
-            };
-            result.push(ScoredEntry { score, entry });
+            id_to_entry.insert(entry.id.clone(), entry);
         }
-        result.truncate(limit);
+
+        // Zip scores back, apply scope filter, respect limit.
+        let scope_owned = scope.map(str::to_owned);
+        let mut result: Vec<ScoredEntry> = scored_ids
+            .into_iter()
+            .filter_map(|(score, id)| {
+                let entry = id_to_entry.remove(&id)?;
+                if scope_owned.is_some() && entry.scope.as_deref() != scope_owned.as_deref() {
+                    return None;
+                }
+                Some(ScoredEntry {
+                    score: f64::from(score),
+                    entry,
+                })
+            })
+            .take(limit)
+            .collect();
+
+        // tantivy already sorted by score DESC; preserve that order.
+        result.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(result)
     }

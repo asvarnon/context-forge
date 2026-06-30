@@ -38,6 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 stop-words = { version = "0.10.0", optional = true }
 turso = "0.6.1"
+tantivy = "0.22"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 async-trait = "0.1"
 uuid = { version = "1.7", features = ["v7"] }
