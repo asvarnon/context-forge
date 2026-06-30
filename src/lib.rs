@@ -1,6 +1,6 @@
 //! `context-forge` — a local-first persistent memory library for LLM applications.
 //!
-//! This crate provides `SQLite` + FTS5 BM25 retrieval, recency-decay scoring, and
+//! This crate provides turso + Tantivy BM25 retrieval, recency-decay scoring, and
 //! token-budget-aware context assembly with no network calls. It is intended to
 //! be embedded in larger applications (CLI tools, bots, agent runtimes) that need
 //! durable, searchable memory.
@@ -69,7 +69,7 @@ pub mod error;
 pub mod scrub;
 /// Session grouping helpers (`group_entries_by_session`, `SessionGroup`).
 pub mod session;
-/// SQLite-backed storage and search implementations. All SQL lives here.
+/// Turso-backed storage and search implementations.
 pub mod storage;
 /// `ContextStorage` and `Searcher` traits, and the crate's `Result` alias.
 pub mod traits;
