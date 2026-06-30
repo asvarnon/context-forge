@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::entry::{ContextEntry, ScoredEntry};
 use crate::error::Error;
 
@@ -8,6 +10,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///
 /// Implementations must be thread-safe (`Send + Sync`) to support
 /// concurrent access from multiple worker threads.
+#[async_trait]
 pub trait ContextStorage: Send + Sync {
     /// Persist a single entry.
     ///
@@ -21,55 +24,56 @@ pub trait ContextStorage: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the underlying storage write fails.
-    fn save(&self, entry: &ContextEntry) -> Result<()>;
+    async fn save(&self, entry: &ContextEntry) -> Result<()>;
 
     /// Return the top-k entries (most recent or highest priority).
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage read fails.
-    fn get_top_k(&self, k: usize) -> Result<Vec<ContextEntry>>;
+    async fn get_top_k(&self, k: usize) -> Result<Vec<ContextEntry>>;
 
     /// Return every stored entry.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage read fails.
-    fn get_all(&self) -> Result<Vec<ContextEntry>>;
+    async fn get_all(&self) -> Result<Vec<ContextEntry>>;
 
     /// Delete an entry by id. Returns `true` if an entry was removed.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage delete fails.
-    fn delete(&self, id: &str) -> Result<bool>;
+    async fn delete(&self, id: &str) -> Result<bool>;
 
     /// Remove all entries. Returns the number of entries removed.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage delete fails.
-    fn clear(&self) -> Result<usize>;
+    async fn clear(&self) -> Result<usize>;
 
     /// Remove all entries within a given scope. Returns the number of entries removed.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage delete fails.
-    fn clear_scope(&self, scope: &str) -> Result<usize>;
+    async fn clear_scope(&self, scope: &str) -> Result<usize>;
 
     /// Return the total number of stored entries.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage read fails.
-    fn count(&self) -> Result<usize>;
+    async fn count(&self) -> Result<usize>;
 }
 
 /// Trait for searching context entries by relevance.
 ///
 /// Implementations must be thread-safe (`Send + Sync`) to support
 /// concurrent access from multiple worker threads.
+#[async_trait]
 pub trait Searcher: Send + Sync {
     /// Search for entries matching `query`, optionally restricted to `scope`,
     /// returning at most `limit` results ordered by descending relevance score.
@@ -91,5 +95,10 @@ pub trait Searcher: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the underlying search fails.
-    fn search(&self, query: &str, scope: Option<&str>, limit: usize) -> Result<Vec<ScoredEntry>>;
+    async fn search(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ScoredEntry>>;
 }

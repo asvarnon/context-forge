@@ -42,8 +42,9 @@ cargo test <test_name>
   with proper error propagation.
 - **`thiserror`** for all errors (`src/error.rs`). `anyhow` is banned
   everywhere in this crate.
-- **Library is sync** — no tokio/async. Async callers wrap calls with
-  `tokio::task::spawn_blocking`. Do not introduce async APIs.
+- **Library is async** — all public `ContextForge` methods are `async` and
+  require a tokio runtime. The `distill-http` feature requires the
+  multi-thread flavor due to internal `block_in_place` usage.
 - **Module purity** — `engine.rs`, `entry.rs`, `session.rs`, and
   `analysis/*` do no I/O. All SQL stays in `storage/`.
 - Idiomatic Rust per the Rust API Guidelines: borrow at API boundaries,
@@ -57,7 +58,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/):
 ```
 feat: add scoped namespace filtering to query
 fix: handle empty query in context assembly
-chore: update rusqlite to 0.40
+chore: update turso to 0.7
 docs: update architecture notes for v3 schema
 test: add migration tests for v2 to v3
 refactor: extract token estimation into engine module
@@ -72,8 +73,8 @@ refactor: extract token estimation into engine module
 ## Testing Expectations
 
 - **Unit tests** for all public functions.
-- **Storage tests** use in-memory SQLite (`:memory:`) where possible;
-  `tempfile` for tests that need a real file path (e.g. migration tests).
+- **Storage tests** use in-memory turso (`:memory:`) where possible;
+  a real file path only when the test specifically exercises on-disk behavior.
 - **Engine/analysis tests** use mock `ContextStorage`/`Searcher`
   implementations — no real database needed.
 - Dependencies are injected via trait objects (`ContextStorage`, `Searcher`)
@@ -84,8 +85,9 @@ refactor: extract token estimation into engine module
 Before contributing, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The
 key constraints:
 
-- All SQL lives in `src/storage/`. `engine.rs`, `entry.rs`, `session.rs`,
-  and `analysis/*` do no I/O.
+- All I/O (turso + Tantivy) lives in `src/storage/`. `engine.rs`, `entry.rs`,
+  `session.rs`, and `analysis/*` do no I/O.
 - `ContextEngine` depends on the `ContextStorage` and `Searcher` traits, never
-  on `rusqlite` or `SqliteStorage`/`SqliteSearcher` directly.
-- Schema migrations (`src/storage/schema.rs`) are forward-only.
+  on `turso` or `TursoStorage`/`TursoSearcher` directly.
+- Schema setup is a single idempotent `CREATE TABLE IF NOT EXISTS` — there is
+  no migration system or `schema_version` table.

@@ -45,10 +45,11 @@ impl Distiller for LineCountDistiller {
     }
 }
 
-fn main() -> Result<(), context_forge::Error> {
+#[tokio::main]
+async fn main() -> Result<(), context_forge::Error> {
     let mut config = Config::default();
     config.db_path = PathBuf::from("chunked-distill-example.db");
-    let cf = ContextForge::open(config)?;
+    let cf = ContextForge::open(config).await?;
 
     // Long enough that a small budget below forces multiple chunks.
     let transcript = "\
@@ -75,14 +76,16 @@ User: Also, remember I prefer terse commit messages, one line max.
         "Distilling a {}-character transcript in chunks of <= {MAX_CHUNK_CHARS} characters:",
         transcript.len()
     );
-    let ids = cf.distill_and_save(transcript, &distiller, &opts)?;
+    let ids = cf.distill_and_save(transcript, &distiller, &opts).await?;
     println!(
         "Saved {} entries (1 merged summary + {} facts).",
         ids.len(),
         ids.len() - 1
     );
 
-    let hits = cf.query("canary commit", Some("project:demo"), 2048)?;
+    let hits = cf
+        .query("canary commit", Some("project:demo"), 2048)
+        .await?;
     println!("\nQuery results for \"canary commit\":");
     for hit in &hits {
         println!("{}: {}", hit.id, hit.content);

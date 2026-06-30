@@ -1,44 +1,28 @@
 //! `context-forge` — a local-first persistent memory library for LLM applications.
 //!
-//! This crate provides `SQLite` + FTS5 BM25 retrieval, recency-decay scoring, and
+//! This crate provides turso + Tantivy BM25 retrieval, recency-decay scoring, and
 //! token-budget-aware context assembly with no network calls. It is intended to
 //! be embedded in larger applications (CLI tools, bots, agent runtimes) that need
 //! durable, searchable memory.
 //!
 //! # Quick start
 //!
-//! ```
+//! ```no_run
 //! use context_forge::{kind, ContextForge, Config, SaveOptions};
 //! use std::path::PathBuf;
 //!
-//! let mut config = Config::default();
-//! config.db_path = PathBuf::from(":memory:");
+//! #[tokio::main]
+//! async fn main() -> Result<(), context_forge::Error> {
+//!     let mut config = Config::default();
+//!     config.db_path = PathBuf::from(":memory:");
 //!
-//! let cf = ContextForge::open(config)?;
-//! cf.save("the deploy failure was caused by a missing env var", kind::SNAPSHOT, &SaveOptions::default())?;
+//!     let cf = ContextForge::open(config).await?;
+//!     cf.save("the deploy failure was caused by a missing env var", kind::SNAPSHOT, &SaveOptions::default()).await?;
 //!
-//! let hits = cf.query("deploy failure", None, 2048)?;
-//! assert_eq!(hits.len(), 1);
-//! # Ok::<(), context_forge::Error>(())
-//! ```
-//!
-//! # Async callers
-//!
-//! This crate is synchronous by design — it performs blocking `SQLite` I/O and
-//! never spawns its own threads or runtime. Callers using an async runtime
-//! (e.g. Tokio) should wrap calls in [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
-//! and share a single [`ContextForge`] instance behind an `Arc`:
-//!
-//! ```ignore
-//! use std::sync::Arc;
-//!
-//! let cf = Arc::new(ContextForge::open(config)?);
-//!
-//! // in an async context:
-//! let hits = tokio::task::spawn_blocking({
-//!     let cf = cf.clone();
-//!     move || cf.query("deploy failure", Some("discord:thread:42"), 2048)
-//! }).await??;
+//!     let hits = cf.query("deploy failure", None, 2048).await?;
+//!     assert_eq!(hits.len(), 1);
+//!     Ok(())
+//! }
 //! ```
 //!
 //! # Security
@@ -85,7 +69,7 @@ pub mod error;
 pub mod scrub;
 /// Session grouping helpers (`group_entries_by_session`, `SessionGroup`).
 pub mod session;
-/// SQLite-backed storage and search implementations. All SQL lives here.
+/// Turso-backed storage and search implementations.
 pub mod storage;
 /// `ContextStorage` and `Searcher` traits, and the crate's `Result` alias.
 pub mod traits;
@@ -111,13 +95,13 @@ pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::Error;
 pub use scrub::{scrub_secrets, ScrubConfig};
 pub use session::{group_entries_by_session, SessionGroup};
-pub use storage::{open_storage, SqliteSearcher, SqliteStorage};
+pub use storage::{open_storage, TursoSearcher, TursoStorage};
 pub use traits::{ContextStorage, Result, Searcher};
 
 /// The documented entry point for `context-forge`.
 ///
-/// `ContextForge` wires together a [`SqliteStorage`] backend, a
-/// [`SqliteSearcher`], and a [`ContextEngine`] behind a small,
+/// `ContextForge` wires together a [`TursoStorage`] backend, a
+/// [`TursoSearcher`], and a [`ContextEngine`] behind a small,
 /// stable API surface. Advanced callers that need direct access to the
 /// underlying storage or searcher can construct those types directly and
 /// pass them to [`ContextEngine::new`] instead.
@@ -132,13 +116,12 @@ impl ContextForge {
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be opened, the connection
-    /// pool cannot be built, or migrations fail.
-    pub fn open(config: Config) -> Result<Self> {
+    /// Returns an error if the database cannot be opened or migrations fail.
+    pub async fn open(config: Config) -> Result<Self> {
         let db_path = config.db_path.clone();
         let max_entries = config.max_entries;
         let scrub_config = config.scrub.clone();
-        let (storage, searcher) = open_storage(Path::new(&db_path), max_entries)?;
+        let (storage, searcher) = open_storage(Path::new(&db_path), max_entries).await?;
         let engine = ContextEngine::new(Box::new(storage), Box::new(searcher), config);
         Ok(Self {
             engine,
@@ -162,9 +145,9 @@ impl ContextForge {
     ///
     /// Returns an error if `content` is empty or if the underlying storage
     /// write fails.
-    pub fn save(&self, content: &str, kind: &str, opts: &SaveOptions) -> Result<String> {
+    pub async fn save(&self, content: &str, kind: &str, opts: &SaveOptions) -> Result<String> {
         let scrubbed = scrub_secrets(content, &self.scrub_config);
-        self.engine.save_snapshot(&scrubbed, kind, opts)
+        self.engine.save_snapshot(&scrubbed, kind, opts).await
     }
 
     /// Distill `transcript` into a summary and durable facts, then save
@@ -196,19 +179,19 @@ impl ContextForge {
     /// # Errors
     ///
     /// Returns an error if distillation fails, or if any save fails.
-    pub fn distill_and_save(
+    pub async fn distill_and_save(
         &self,
         transcript: &str,
         distiller: &dyn Distiller,
         opts: &SaveOptions,
     ) -> Result<Vec<String>> {
         let scrubbed_transcript = scrub_secrets(transcript, &self.scrub_config);
-        let memory = distiller.distill(&scrubbed_transcript)?;
+        let memory = tokio::task::block_in_place(|| distiller.distill(&scrubbed_transcript))?;
         let memory = crate::distill::cap_distilled_memory(memory);
 
         let mut ids = Vec::with_capacity(1 + memory.facts.len());
 
-        let summary_id = self.save(&memory.summary, kind::SUMMARY, opts)?;
+        let summary_id = self.save(&memory.summary, kind::SUMMARY, opts).await?;
         ids.push(summary_id);
 
         for fact in &memory.facts {
@@ -227,7 +210,7 @@ impl ContextForge {
                 scope: opts.scope.clone(),
                 metadata: Some(metadata),
             };
-            let fact_id = self.save(&fact.text, kind::FACT, &fact_opts)?;
+            let fact_id = self.save(&fact.text, kind::FACT, &fact_opts).await?;
             ids.push(fact_id);
         }
 
@@ -252,13 +235,13 @@ impl ContextForge {
     /// # Errors
     ///
     /// Returns an error if the search or recency-weighting step fails.
-    pub fn query(
+    pub async fn query(
         &self,
         query: &str,
         scope: Option<&str>,
         token_budget: usize,
     ) -> Result<Vec<ContextEntry>> {
-        self.engine.assemble(query, scope, token_budget)
+        self.engine.assemble(query, scope, token_budget).await
     }
 
     /// Delete a single entry by id. Returns `true` if an entry was removed.
@@ -266,8 +249,8 @@ impl ContextForge {
     /// # Errors
     ///
     /// Returns an error if the underlying storage delete fails.
-    pub fn delete(&self, id: &str) -> Result<bool> {
-        self.engine.storage().delete(id)
+    pub async fn delete(&self, id: &str) -> Result<bool> {
+        self.engine.storage().delete(id).await
     }
 
     /// Remove all entries within a given scope. Returns the number of
@@ -276,8 +259,8 @@ impl ContextForge {
     /// # Errors
     ///
     /// Returns an error if the underlying storage delete fails.
-    pub fn clear_scope(&self, scope: &str) -> Result<usize> {
-        self.engine.storage().clear_scope(scope)
+    pub async fn clear_scope(&self, scope: &str) -> Result<usize> {
+        self.engine.storage().clear_scope(scope).await
     }
 
     /// Remove all entries. Returns the number of entries removed.
@@ -285,8 +268,8 @@ impl ContextForge {
     /// # Errors
     ///
     /// Returns an error if the underlying storage delete fails.
-    pub fn clear_all(&self) -> Result<usize> {
-        self.engine.storage().clear()
+    pub async fn clear_all(&self) -> Result<usize> {
+        self.engine.storage().clear().await
     }
 
     /// Return the total number of stored entries.
@@ -294,8 +277,8 @@ impl ContextForge {
     /// # Errors
     ///
     /// Returns an error if the underlying storage count fails.
-    pub fn count(&self) -> Result<usize> {
-        self.engine.storage().count()
+    pub async fn count(&self) -> Result<usize> {
+        self.engine.storage().count().await
     }
 }
 
@@ -394,42 +377,47 @@ mod tests {
         assert_send_sync::<ContextForge>();
     }
 
-    #[test]
-    fn context_forge_open_save_query_roundtrip() {
+    #[tokio::test]
+    async fn context_forge_open_save_query_roundtrip() {
         let config = Config {
             db_path: PathBuf::from(":memory:"),
             ..Config::default()
         };
-        let cf = ContextForge::open(config).unwrap();
+        let cf = ContextForge::open(config).await.unwrap();
 
         let id = cf
             .save("hello world", kind::MANUAL, &SaveOptions::default())
+            .await
             .unwrap();
         assert!(!id.is_empty());
-        assert_eq!(cf.count().unwrap(), 1);
+        assert_eq!(cf.count().await.unwrap(), 1);
 
-        let hits = cf.query("hello", None, 1000).unwrap();
+        let hits = cf.query("hello", None, 1000).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id);
 
-        assert!(cf.delete(&id).unwrap());
-        assert_eq!(cf.count().unwrap(), 0);
+        assert!(cf.delete(&id).await.unwrap());
+        assert_eq!(cf.count().await.unwrap(), 0);
     }
 
-    #[test]
-    fn context_forge_clear_all() {
+    #[tokio::test]
+    async fn context_forge_clear_all() {
         let config = Config {
             db_path: PathBuf::from(":memory:"),
             ..Config::default()
         };
-        let cf = ContextForge::open(config).unwrap();
+        let cf = ContextForge::open(config).await.unwrap();
 
-        cf.save("a", kind::MANUAL, &SaveOptions::default()).unwrap();
-        cf.save("b", kind::MANUAL, &SaveOptions::default()).unwrap();
+        cf.save("a", kind::MANUAL, &SaveOptions::default())
+            .await
+            .unwrap();
+        cf.save("b", kind::MANUAL, &SaveOptions::default())
+            .await
+            .unwrap();
 
-        let cleared = cf.clear_all().unwrap();
+        let cleared = cf.clear_all().await.unwrap();
         assert_eq!(cleared, 2);
-        assert_eq!(cf.count().unwrap(), 0);
+        assert_eq!(cf.count().await.unwrap(), 0);
     }
 
     /// A stub [`Distiller`] for tests that records the transcript it was
@@ -465,13 +453,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn distill_and_save_scrubs_saves_and_returns_ids() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn distill_and_save_scrubs_saves_and_returns_ids() {
         let config = Config {
             db_path: PathBuf::from(":memory:"),
             ..Config::default()
         };
-        let cf = ContextForge::open(config).unwrap();
+        let cf = ContextForge::open(config).await.unwrap();
 
         let distiller = StubDistiller::new();
         let transcript = "Here is a secret key=AKIAABCDEFGHIJKLMNOP end of transcript";
@@ -482,7 +470,10 @@ mod tests {
             metadata: None,
         };
 
-        let ids = cf.distill_and_save(transcript, &distiller, &opts).unwrap();
+        let ids = cf
+            .distill_and_save(transcript, &distiller, &opts)
+            .await
+            .unwrap();
 
         // Summary ID first, then one ID per fact.
         assert_eq!(ids.len(), 3);
@@ -498,6 +489,7 @@ mod tests {
         // Summary saved with kind::SUMMARY.
         let summary = cf
             .query("rollback OR rollback OR roll", None, 10_000)
+            .await
             .unwrap();
         let summary_entry = summary
             .iter()
@@ -508,7 +500,7 @@ mod tests {
         assert_eq!(summary_entry.session_id.as_deref(), Some("sess-1"));
 
         // Facts saved with kind::FACT and the right metadata.
-        let all = cf.query(MATCH_ALL_QUERY, None, 100_000).unwrap();
+        let all = cf.query(MATCH_ALL_QUERY, None, 100_000).await.unwrap();
         for fact_id in &ids[1..] {
             let fact_entry = all
                 .iter()
@@ -543,13 +535,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn distill_and_save_caps_excess_facts() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn distill_and_save_caps_excess_facts() {
         let config = Config {
             db_path: PathBuf::from(":memory:"),
             ..Config::default()
         };
-        let cf = ContextForge::open(config).unwrap();
+        let cf = ContextForge::open(config).await.unwrap();
 
         let distiller = ManyFactsDistiller {
             fact_count: crate::distill::MAX_FACTS + 20,
@@ -557,10 +549,11 @@ mod tests {
 
         let ids = cf
             .distill_and_save("transcript", &distiller, &SaveOptions::default())
+            .await
             .unwrap();
 
         // Summary ID first, then one ID per capped fact.
         assert_eq!(ids.len(), 1 + crate::distill::MAX_FACTS);
-        assert_eq!(cf.count().unwrap(), 1 + crate::distill::MAX_FACTS);
+        assert_eq!(cf.count().await.unwrap(), 1 + crate::distill::MAX_FACTS);
     }
 }

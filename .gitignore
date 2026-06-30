@@ -13,6 +13,7 @@ out/
 
 # IDE
 .vscode/
+.zed/
 *.swp
 
 # Agent config (local only)
@@ -23,3 +24,6 @@ CLAUDE.md
 # Validation scripts (throwaway diagnostics)
 scripts/validate_*.py
 __pycache__/
+
+# Step 0 exploration spikes (not part of the library crate)
+spikes/
