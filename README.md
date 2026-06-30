@@ -1,8 +1,8 @@
 # Context Forge
 
-A local-first persistent memory library for LLM applications. SQLite + FTS5
-BM25 retrieval, recency-decay scoring, and token-budget-aware context
-assembly — no network calls, no async runtime, no cloud dependency.
+A local-first persistent memory library for LLM applications. turso (async
+SQLite) + standalone Tantivy BM25 retrieval, recency-decay scoring, and
+token-budget-aware context assembly — no cloud dependency, fully async.
 
 Embed it in a bot, agent runtime, or MCP server that needs durable,
 searchable memory across sessions.
@@ -38,12 +38,13 @@ context-forge = "=0.5.0-<latest-beta>"
 use context_forge::{kind, Config, ContextForge, SaveOptions};
 use std::path::PathBuf;
 
-fn main() -> Result<(), context_forge::Error> {
+#[tokio::main]
+async fn main() -> Result<(), context_forge::Error> {
     // `Config` is `#[non_exhaustive]` — start from `Default` and mutate.
     let mut config = Config::default();
     config.db_path = PathBuf::from("memory.db");
 
-    let cf = ContextForge::open(config)?;
+    let cf = ContextForge::open(config).await?;
 
     // Save an entry into a named scope (namespace). `None` means global scope.
     let opts = SaveOptions {
@@ -54,10 +55,11 @@ fn main() -> Result<(), context_forge::Error> {
         "the deploy failure was caused by a missing env var",
         kind::SNAPSHOT,
         &opts,
-    )?;
+    )
+    .await?;
 
     // Query within that scope, capped to a token budget.
-    let hits = cf.query("deploy failure", Some("project:demo"), 2048)?;
+    let hits = cf.query("deploy failure", Some("project:demo"), 2048).await?;
     for hit in &hits {
         println!("{}: {}", hit.id, hit.content);
     }
@@ -108,24 +110,23 @@ split/merge logic.
 See [`examples/chunked_distill.rs`](examples/chunked_distill.rs) for a
 runnable, no-network example.
 
-## Async callers
+## Runtime requirement
 
-This crate is synchronous by design — it performs blocking SQLite I/O and
-never spawns its own threads or runtime. Callers using an async runtime
-(e.g. Tokio) should wrap calls in
-[`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
-and share a single `ContextForge` instance behind an `Arc`:
+This crate is fully async — all public methods on `ContextForge` return
+futures and must be `.await`ed. A **tokio** runtime is required. The
+`distill-http` feature additionally requires the multi-thread flavor
+(`#[tokio::main]` or `tokio::runtime::Builder::new_multi_thread()`) because
+`distill_and_save` uses `tokio::task::block_in_place` internally.
+
+`ContextForge` is `Send + Sync` and can be shared across tasks directly:
 
 ```rust,ignore
 use std::sync::Arc;
 
-let cf = Arc::new(ContextForge::open(config)?);
+let cf = Arc::new(ContextForge::open(config).await?);
 
-// in an async context:
-let hits = tokio::task::spawn_blocking({
-    let cf = cf.clone();
-    move || cf.query("deploy failure", Some("discord:thread:42"), 2048)
-}).await??;
+// share across tokio tasks — no spawn_blocking needed
+let hits = cf.query("deploy failure", Some("discord:thread:42"), 2048).await?;
 ```
 
 ## Security
@@ -181,9 +182,11 @@ anything found in it.
   half-life 259,200s / 72h, configurable via `Config`), then sort by weighted
   score descending, then greedy bin-pack into the token budget. Oversized
   entries are skipped, not aborting. Also owns `save_snapshot`. No I/O.
-- `storage` — all SQL: rusqlite + r2d2 connection pool, WAL mode, FTS5
-  virtual table kept in sync via triggers, forward-only migrations
-  (`schema.rs`). Current schema version is v3.
+- `storage` — turso (async SQLite) for persistence, standalone Tantivy for
+  in-memory BM25 indexing. Dual-write on save: turso commits to disk, tantivy
+  updates the in-memory index. On open, the tantivy index is rebuilt from
+  turso (linear startup cost, negligible for small corpora). turso is the
+  source of truth; tantivy is a derived index.
 - `analysis` (feature `analysis`) — importance-detection pipeline
   (tokenizer, lexicon, n-grams, scoring). Pure computation, no I/O.
 - `scrub` — secret-scrubbing patterns and `scrub_secrets`. Pure, no I/O.
@@ -195,14 +198,14 @@ Entries carry a `scope` field (e.g. `"discord:thread:42"`,
 
 ## Status
 
-Reworked from a Claude Code compaction-memory plugin into a general-purpose
-library. All features are implemented and tested: single-crate layout, scoped
-data model, the `ContextForge` public API facade, save-time secret scrubbing,
-optional rayon parallelism (`parallel`), and local-LLM thread distillation via
-an OpenAI-compatible endpoint (`distill-http`).
+All features implemented and tested: single-crate layout, scoped data model,
+the `ContextForge` async public API facade, real BM25 scoring via standalone
+Tantivy, save-time secret scrubbing, optional rayon parallelism (`parallel`),
+and local-LLM distillation via an OpenAI-compatible endpoint (`distill-http`).
 
-Published as a **`0.5.0-beta`** pre-release while the API proves itself in a
-real downstream consumer. Because it is a pre-release, depend on it with an
-exact version pin (see [Installation](#installation)) — Cargo's default
-version ranges never match pre-release versions. Any breaking changes that
-integration surfaces land as further betas before the final `0.5.0` cut.
+Live-validated against a Discord bot (Husk) across save/recall, BM25 ranking,
+restart persistence, scope isolation, and secret-scrubbing test scenarios.
+
+Storage is turso (async SQLite) + standalone Tantivy — rusqlite, r2d2, and
+FTS5 have been removed. This is a breaking API change from `0.5.x`: all public
+methods are now `async`.

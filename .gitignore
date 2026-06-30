@@ -13,6 +13,7 @@ out/
 
 # IDE
 .vscode/
+.zed/
 *.swp
 
 # Agent config (local only)

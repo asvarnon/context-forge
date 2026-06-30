@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- Storage backend replaced: `rusqlite` + `r2d2` + FTS5 → `turso` (async SQLite) + standalone `tantivy`
+- All public `ContextForge` methods are now `async` — `open`, `save`, `query`, `delete`, `clear_scope`, `clear_all`, `count` all require `.await`
+- A tokio runtime is now required; callers no longer need `spawn_blocking` wrappers
+- `distill-http` feature requires a multi-thread tokio runtime (uses `block_in_place` internally)
+
+### Features
+
+- Real BM25 scoring via standalone `tantivy` — all FTS search results carry meaningful non-zero relevance scores
+- Async-native API; `Arc<ContextForge>` can be shared across tokio tasks without external locking
+- In-memory `tantivy` index rebuilt from `turso` on startup (turso is source of truth; tantivy is a derived in-memory index)
+- Dual-write on save: `turso` persists to disk, `tantivy` updates the in-memory BM25 index atomically after each write
+
+### Removed
+
+- `rusqlite`, `r2d2`, `r2d2_sqlite` dependencies removed
+- `src/storage/schema.rs` (forward-only migration system) removed — schema setup is now a single idempotent `CREATE TABLE IF NOT EXISTS` batch
+- `src/storage/searcher.rs` (`SqliteSearcher`, FTS5 MATCH-based search) removed
+
+### Bug Fixes
+
+- `distill-http` feature no longer panics when `distill_and_save` is called from a tokio worker thread; each distill call now spawns a bare OS thread with a fresh `reqwest::blocking::Client`
+
 ## [0.5.0] - 2026-06-20
 
 ### Features
