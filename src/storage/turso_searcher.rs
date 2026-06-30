@@ -60,19 +60,22 @@ impl Searcher for TursoSearcher {
         conn.busy_timeout(Duration::from_secs(5))?;
         let scope_owned = scope.map(str::to_owned);
 
-        // Use fts_match() instead of the MATCH operator: the operator form breaks
-        // under compound WHERE clauses; fts_match() works as a standalone scalar
-        // function (documented as usable without an FTS index).
+        // fts_score(content, ?1) occupies column 8. It returns a real BM25 value when
+        // the optimizer routes the query through the Tantivy index scan; otherwise it
+        // returns 0.0 (corpus-level IDF statistics are only available inside that scan
+        // context — fts_score has no per-row fallback the way fts_match does).
+        // Scope filtering is done in Rust so the WHERE clause stays simple enough for
+        // the optimizer to potentially recognize the fts_score + fts_match pattern.
         let mut rows = conn
             .query(
-                "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata \
+                "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata, \
+                 fts_score(content, ?1) AS score \
                  FROM entries \
-                 WHERE fts_match(content, ?1) AND (?2 IS NULL OR scope = ?2) \
-                 ORDER BY timestamp DESC \
-                 LIMIT ?3",
+                 WHERE fts_match(content, ?1) \
+                 ORDER BY score DESC \
+                 LIMIT ?2",
                 (
                     match_expr,
-                    scope_owned,
                     i64::try_from(limit).unwrap_or(i64::MAX),
                 ),
             )
@@ -81,9 +84,24 @@ impl Searcher for TursoSearcher {
         let mut result = Vec::new();
         while let Some(row) = rows.next().await? {
             let entry = turso_row_to_entry(&row)?;
-            // BM25 scoring via fts_score() is deferred to Step 4 (tantivy integration).
-            result.push(ScoredEntry { score: 1.0, entry });
+            // Apply scope filter in Rust: the SQL WHERE omits it so the query pattern
+            // stays closer to what the optimizer recognizes for fts_score.
+            if scope_owned.is_some() && entry.scope.as_deref() != scope_owned.as_deref() {
+                continue;
+            }
+            let score = match row.get_value(8)? {
+                turso::Value::Real(f) => f,
+                turso::Value::Integer(i) => i as f64,
+                turso::Value::Null => 0.0,
+                other => {
+                    return Err(crate::Error::Migration(format!(
+                        "fts_score: unexpected value type {other:?}"
+                    )))
+                }
+            };
+            result.push(ScoredEntry { score, entry });
         }
+        result.truncate(limit);
 
         Ok(result)
     }
