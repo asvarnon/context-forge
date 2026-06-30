@@ -5,33 +5,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::entry::ContextEntry;
-use crate::storage::schema::SCHEMA_V2;
 use crate::traits::ContextStorage;
 
-// V1 schema without fts5 virtual table or triggers.
-// The turso FTS index is added by the turso_migrate epilogue.
-const TURSO_SCHEMA_V1: &str = r"
+const TURSO_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS entries (
-    id          TEXT PRIMARY KEY,
-    content     TEXT NOT NULL,
-    timestamp   INTEGER NOT NULL,
-    kind        TEXT NOT NULL CHECK(kind IN ('Manual','PreCompact','Auto')),
-    token_count INTEGER CHECK(token_count >= 0),
-    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
-) STRICT;
-
-CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
-";
-
-// V3 rebuild without fts5 virtual table or triggers.
-// Identical logic to schema.rs SCHEMA_V3 except:
-//   - DROP TRIGGER IF EXISTS uses IF EXISTS (safe for turso-native DBs with no triggers)
-//   - DROP TABLE IF EXISTS entries_fts (safe when fts5 table was never created)
-//   - No CREATE VIRTUAL TABLE / INSERT INTO entries_fts / CREATE TRIGGER
-const TURSO_SCHEMA_V3: &str = r"
-BEGIN IMMEDIATE;
-
-CREATE TABLE entries_v3 (
     id          TEXT PRIMARY KEY,
     content     TEXT NOT NULL,
     timestamp   INTEGER NOT NULL,
@@ -43,36 +20,9 @@ CREATE TABLE entries_v3 (
     created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
 ) STRICT;
 
-INSERT INTO entries_v3 (id, content, timestamp, kind, scope, session_id, token_count, metadata, created_at)
-SELECT id, content, timestamp,
-       CASE kind WHEN 'Manual' THEN 'manual' WHEN 'PreCompact' THEN 'snapshot' WHEN 'Auto' THEN 'summary' ELSE lower(kind) END,
-       NULL,
-       session_id, token_count,
-       json_patch('{}', json_object(
-           'runtime', runtime, 'model', model, 'cwd', cwd,
-           'git_branch', git_branch, 'git_sha', git_sha,
-           'compaction_trigger', compaction_trigger,
-           'turn_id', turn_id, 'agent_type', agent_type, 'agent_id', agent_id)),
-       created_at
-FROM entries;
-
-DROP TRIGGER IF EXISTS entries_ai;
-DROP TRIGGER IF EXISTS entries_ad;
-DROP TRIGGER IF EXISTS entries_au;
-DROP TABLE IF EXISTS entries_fts;
-DROP TABLE entries;
-ALTER TABLE entries_v3 RENAME TO entries;
-
 CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
 CREATE INDEX IF NOT EXISTS idx_entries_scope ON entries(scope);
 CREATE INDEX IF NOT EXISTS idx_entries_session_id ON entries(session_id);
-
-DROP TABLE IF EXISTS runtime_field_mappings;
-DROP TABLE IF EXISTS runtime_configs;
-DROP TABLE IF EXISTS entry_metadata_raw;
-
-INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 3);
-COMMIT;
 ";
 
 /// Turso-backed implementation of [`crate::traits::ContextStorage`].
@@ -106,62 +56,12 @@ impl TursoStorage {
 }
 
 pub(crate) async fn turso_migrate(conn: &turso::Connection) -> crate::Result<()> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS schema_version \
-         (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)",
-        (),
-    )
-    .await?;
-
-    let mut rows = conn
-        .query(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            (),
-        )
-        .await?;
-
-    let version: i64 = match rows.next().await? {
-        Some(row) => match row.get_value(0)? {
-            turso::Value::Integer(v) => v,
-            _ => 0,
-        },
-        None => 0,
-    };
-
-    if version < 1 {
-        conn.execute_batch(TURSO_SCHEMA_V1).await?;
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 1)",
-            (),
-        )
-        .await?;
-    }
-
-    if version < 2 {
-        conn.execute_batch(SCHEMA_V2).await?;
-    }
-
-    if version < 3 {
-        conn.execute_batch(TURSO_SCHEMA_V3).await?;
-    }
-
-    // Remove fts5 virtual table and triggers that rusqlite migrations may have left behind.
-    // These conflict with turso's native FTS MATCH operator.
-    conn.execute_batch(
-        "DROP TRIGGER IF EXISTS entries_ai; \
-         DROP TRIGGER IF EXISTS entries_ad; \
-         DROP TRIGGER IF EXISTS entries_au; \
-         DROP TABLE IF EXISTS entries_fts;",
-    )
-    .await?;
-
-    // Ensure the turso FTS index exists, regardless of migration path.
+    conn.execute_batch(TURSO_SCHEMA).await?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_turso_fts ON entries USING fts (content)",
         (),
     )
     .await?;
-
     Ok(())
 }
 

@@ -289,24 +289,12 @@ impl ContextStorage for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use rusqlite::Connection;
 
     use crate::engine::MATCH_ALL_QUERY;
     use crate::entry::{kind, ContextEntry};
-    use crate::storage::{open_storage, SqliteStorage};
+    use crate::storage::open_storage;
     use crate::traits::{ContextStorage, Searcher};
-
-    fn temp_db_path(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock drift before unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("cf-storage-{name}-{nanos}.db"))
-    }
 
     fn make_entry(id: &str, content: &str, timestamp: i64, kind: &str) -> ContextEntry {
         ContextEntry {
@@ -332,13 +320,6 @@ mod tests {
             token_count: None,
             metadata: None,
         }
-    }
-
-    #[test]
-    fn checkpoint_runs_without_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = SqliteStorage::open(dir.path().join("test.db").as_path(), 100).unwrap();
-        assert!(storage.checkpoint().is_ok());
     }
 
     #[tokio::test]
@@ -479,213 +460,6 @@ mod tests {
 
         let results_all = searcher.search("rust", None, 5).await.unwrap();
         assert_eq!(results_all.len(), 2);
-    }
-
-    #[test]
-    fn test_v2_migration_idempotent() {
-        let storage1 = SqliteStorage::open(Path::new(":memory:"), 100).unwrap();
-        let conn = storage1.pool().get().unwrap();
-        // Running migrate a second time on the same connection should succeed.
-        crate::storage::schema::migrate(&conn).unwrap();
-    }
-
-    #[test]
-    fn test_v1_to_v3_migration() {
-        let db_path = temp_db_path("v1-to-v3");
-
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(crate::storage::schema::SCHEMA_V1)
-                .unwrap();
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 1)",
-                [],
-            )
-            .unwrap();
-
-            conn.execute(
-                "INSERT INTO entries (id, content, timestamp, kind, token_count) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["m1", "manual entry", 100_i64, "Manual", 2_i64],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO entries (id, content, timestamp, kind, token_count) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["p1", "precompact entry", 200_i64, "PreCompact", 3_i64],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO entries (id, content, timestamp, kind, token_count) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["a1", "auto entry", 300_i64, "Auto", 4_i64],
-            )
-            .unwrap();
-        }
-
-        let storage = SqliteStorage::open(&db_path, 100).unwrap();
-        let conn = storage.pool().get().unwrap();
-
-        let version: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, 3);
-
-        // Kinds are remapped to the new lowercase TEXT vocabulary.
-        let mut kinds: Vec<String> = conn
-            .prepare("SELECT kind FROM entries ORDER BY timestamp")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        kinds.sort();
-        assert_eq!(kinds, vec!["manual", "snapshot", "summary"]);
-
-        let tags: i64 = conn
-            .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(tags, 0, "tags table should exist but be empty");
-
-        let entry_tags: i64 = conn
-            .query_row("SELECT COUNT(*) FROM entry_tags", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(entry_tags, 0, "entry_tags table should exist but be empty");
-
-        // v2-only runtime tables are gone after the v3 rebuild.
-        let runtime_configs_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='runtime_configs'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(runtime_configs_exists, 0);
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[tokio::test]
-    async fn test_v2_to_v3_migration() {
-        let db_path = temp_db_path("v2-to-v3");
-
-        {
-            let conn = Connection::open(&db_path).unwrap();
-
-            // Build a v2 fixture by running SCHEMA_V1 then SCHEMA_V2 directly,
-            // then inserting rows with runtime columns populated.
-            conn.execute_batch(crate::storage::schema::SCHEMA_V1)
-                .unwrap();
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, 1)",
-                [],
-            )
-            .unwrap();
-            conn.execute_batch(crate::storage::schema::SCHEMA_V2)
-                .unwrap();
-
-            conn.execute(
-                "INSERT INTO entries (
-                    id, content, timestamp, kind, token_count, session_id,
-                    compaction_count, compaction_trigger, runtime, model, cwd,
-                    git_branch, git_sha, turn_id, agent_type, agent_id
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                rusqlite::params![
-                    "a1",
-                    "auto entry with runtime metadata",
-                    300_i64,
-                    "Auto",
-                    4_i64,
-                    "session-abc",
-                    2_i64,
-                    "matcher:threshold",
-                    "codex",
-                    "gpt-5.3-codex",
-                    "/workspace/context-forge",
-                    "feature/schema-v2",
-                    "abc123def",
-                    "turn-77",
-                    "coder",
-                    "agent-main",
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO entries (id, content, timestamp, kind, token_count) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["m1", "manual entry", 100_i64, "Manual", 2_i64],
-            )
-            .unwrap();
-        }
-
-        let storage = SqliteStorage::open(&db_path, 100).unwrap();
-
-        // entries preserved
-        let all = storage.get_all().await.unwrap();
-        assert_eq!(all.len(), 2);
-
-        // kinds remapped: 'Auto' -> 'summary', 'Manual' -> 'manual'
-        let auto_entry = all.iter().find(|e| e.id == "a1").unwrap();
-        let manual_entry = all.iter().find(|e| e.id == "m1").unwrap();
-        assert_eq!(auto_entry.kind, "summary");
-        assert_eq!(manual_entry.kind, "manual");
-
-        // runtime fields present inside metadata JSON
-        let metadata = auto_entry
-            .metadata
-            .as_ref()
-            .expect("metadata should be present for migrated v2 entry");
-        assert_eq!(metadata["runtime"], "codex");
-        assert_eq!(metadata["model"], "gpt-5.3-codex");
-        assert_eq!(metadata["cwd"], "/workspace/context-forge");
-        assert_eq!(metadata["git_branch"], "feature/schema-v2");
-        assert_eq!(metadata["git_sha"], "abc123def");
-        assert_eq!(metadata["compaction_trigger"], "matcher:threshold");
-        assert_eq!(metadata["turn_id"], "turn-77");
-        assert_eq!(metadata["agent_type"], "coder");
-        assert_eq!(metadata["agent_id"], "agent-main");
-
-        // session_id and token_count survive the rebuild
-        assert_eq!(auto_entry.session_id.as_deref(), Some("session-abc"));
-        assert_eq!(auto_entry.token_count, Some(4));
-
-        // FTS query still matches content
-        let (_, searcher) = open_storage(&db_path, 100).await.unwrap();
-        let results = searcher.search("runtime metadata", None, 10).await.unwrap();
-        assert!(
-            results.iter().any(|r| r.entry.id == "a1"),
-            "FTS search should still find the migrated entry's content"
-        );
-
-        // runtime_configs table is gone
-        let conn = storage.pool().get().unwrap();
-        let runtime_configs_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='runtime_configs'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(runtime_configs_exists, 0);
-
-        let version: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, 3);
-
-        let _ = fs::remove_file(&db_path);
     }
 
     #[tokio::test]
