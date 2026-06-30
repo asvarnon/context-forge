@@ -296,6 +296,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fts_search_scores_are_nonzero() {
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        storage.save(&make_entry("e1", "rust programming language", 100, kind::MANUAL)).await.unwrap();
+        storage.save(&make_entry("e2", "python scripting tools", 200, kind::MANUAL)).await.unwrap();
+
+        let results = searcher.search("rust", None, 5).await.unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results[0].score > 0.0,
+            "expected non-zero BM25 score from tantivy, got {}",
+            results[0].score
+        );
+    }
+
+    #[tokio::test]
     async fn search_or_joins_terms_for_message_length_queries() {
         let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
         storage.save(&make_entry("e1", "alpha one", 100, kind::MANUAL)).await.unwrap();
