@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::OwnedValue;
-use tantivy::TantivyDocument;
+use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::schema::{IndexRecordOption, OwnedValue};
+use tantivy::{TantivyDocument, Term};
 
 use crate::engine::MATCH_ALL_QUERY;
 use crate::entry::ScoredEntry;
@@ -45,19 +45,27 @@ impl Searcher for TursoSearcher {
         // --- tantivy BM25 search ---
         let searcher = self.fts.reader.searcher();
         // parse_query_lenient: OR-joins terms by default and never errors on bad syntax.
-        let (tantivy_query, _errors) =
+        let (content_query, _errors) =
             QueryParser::for_index(searcher.index(), vec![self.fts.content_field])
                 .parse_query_lenient(query);
 
-        let limit_for_tantivy = if scope.is_some() {
-            // Over-fetch when scope filtering in Rust; cap at a reasonable ceiling.
-            (limit * 10).max(100)
+        // When a scope is requested, combine the content query with an exact-match
+        // scope term so TopDocs is already scoped — no overfetch or Rust-side filter needed.
+        let tantivy_query: Box<dyn tantivy::query::Query> = if let Some(s) = scope {
+            let scope_term = Term::from_field_text(self.fts.scope_field, s);
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, content_query),
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(scope_term, IndexRecordOption::Basic)),
+                ),
+            ]))
         } else {
-            limit
+            content_query
         };
 
         let top_docs = searcher
-            .search(&tantivy_query, &TopDocs::with_limit(limit_for_tantivy))
+            .search(&tantivy_query, &TopDocs::with_limit(limit))
             .map_err(|e| crate::Error::Migration(e.to_string()))?;
 
         if top_docs.is_empty() {
@@ -101,21 +109,16 @@ impl Searcher for TursoSearcher {
             id_to_entry.insert(entry.id.clone(), entry);
         }
 
-        // Zip scores back, apply scope filter, respect limit.
-        let scope_owned = scope.map(str::to_owned);
+        // Zip scores back in tantivy's ranked order.
         let mut result: Vec<ScoredEntry> = scored_ids
             .into_iter()
             .filter_map(|(score, id)| {
                 let entry = id_to_entry.remove(&id)?;
-                if scope_owned.is_some() && entry.scope.as_deref() != scope_owned.as_deref() {
-                    return None;
-                }
                 Some(ScoredEntry {
                     score: f64::from(score),
                     entry,
                 })
             })
-            .take(limit)
             .collect();
 
         // tantivy already sorted by score DESC; preserve that order.

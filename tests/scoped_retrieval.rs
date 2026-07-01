@@ -75,6 +75,48 @@ async fn scoped_save_and_query_do_not_cross_contaminate() {
 }
 
 #[tokio::test]
+async fn scope_starvation_regression() {
+    // 120 high-scoring scope-B entries must not crowd out 1 scope-A entry.
+    // With the old global-TopDocs + Rust-side filter approach the overfetch ceiling
+    // was (limit * 10).max(100) = 100, so the scope-A entry at global rank 121+ was
+    // never returned. The BooleanQuery fix makes TopDocs scope-aware, so the scope-A
+    // entry is the only candidate and surfaces immediately.
+    let config = Config::default();
+    let cf = ContextForge::open(config)
+        .await
+        .expect("open in-memory store");
+
+    for i in 0..120_usize {
+        cf.save(
+            &format!(
+                "starship propulsion research entry {i} covering interstellar starship design"
+            ),
+            kind::FACT,
+            &scoped_options("guild:beta"),
+        )
+        .await
+        .expect("save scope B entry");
+    }
+
+    cf.save(
+        "starship landing sequence confirmed",
+        kind::FACT,
+        &scoped_options("guild:alpha"),
+    )
+    .await
+    .expect("save scope A entry");
+
+    let hits = cf
+        .query("starship", Some("guild:alpha"), 10)
+        .await
+        .expect("scoped query");
+
+    assert_eq!(hits.len(), 1, "scope-A entry crowded out by scope-B corpus");
+    assert_eq!(hits[0].scope.as_deref(), Some("guild:alpha"));
+    assert!(hits[0].content.contains("starship"));
+}
+
+#[tokio::test]
 async fn match_all_query_respects_scope() {
     let config = Config::default();
     let cf = ContextForge::open(config)

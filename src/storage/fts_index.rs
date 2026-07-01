@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use tantivy::schema::{Field, Schema, STORED, TEXT};
+use tantivy::schema::{Field, Schema, STORED, STRING, TEXT};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 const WRITER_HEAP_BYTES: usize = 50_000_000; // 50 MB
@@ -14,6 +14,7 @@ pub(crate) struct FtsIndex {
     pub(crate) reader: IndexReader,
     pub(crate) id_field: Field,
     pub(crate) content_field: Field,
+    pub(crate) scope_field: Field,
 }
 
 impl FtsIndex {
@@ -23,6 +24,10 @@ impl FtsIndex {
         let mut schema_builder = Schema::builder();
         let id_field = schema_builder.add_text_field("id", STORED);
         let content_field = schema_builder.add_text_field("content", TEXT);
+        // STRING = raw/keyword tokenizer: indexes the whole value as one term so
+        // "discord:guild:123456789" is one token, not three. Required for exact-match
+        // TermQuery filtering by scope.
+        let scope_field = schema_builder.add_text_field("scope", STRING);
         let schema = schema_builder.build();
 
         let index = Index::create_in_ram(schema);
@@ -40,11 +45,12 @@ impl FtsIndex {
             reader,
             id_field,
             content_field,
+            scope_field,
         }))
     }
 
     /// Add a document. Does not commit — call `commit` when the batch is done.
-    pub(crate) fn add(&self, id: &str, content: &str) -> crate::Result<()> {
+    pub(crate) fn add(&self, id: &str, content: &str, scope: Option<&str>) -> crate::Result<()> {
         let writer = self
             .writer
             .lock()
@@ -57,6 +63,9 @@ impl FtsIndex {
         let mut doc = TantivyDocument::default();
         doc.add_text(self.id_field, id);
         doc.add_text(self.content_field, content);
+        if let Some(s) = scope {
+            doc.add_text(self.scope_field, s);
+        }
         writer
             .add_document(doc)
             .map_err(|e| crate::Error::Migration(e.to_string()))?;

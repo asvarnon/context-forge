@@ -56,7 +56,9 @@ impl TursoStorage {
 
         // Rebuild tantivy index from all existing entries.
         let fts = FtsIndex::new()?;
-        let mut rows = conn.query("SELECT id, content FROM entries", ()).await?;
+        let mut rows = conn
+            .query("SELECT id, content, scope FROM entries", ())
+            .await?;
         while let Some(row) = rows.next().await? {
             let turso::Value::Text(id) = row.get_value(0)? else {
                 continue;
@@ -64,7 +66,11 @@ impl TursoStorage {
             let turso::Value::Text(content) = row.get_value(1)? else {
                 continue;
             };
-            fts.add(&id, &content)?;
+            let scope = match row.get_value(2)? {
+                turso::Value::Text(s) => Some(s),
+                _ => None,
+            };
+            fts.add(&id, &content, scope.as_deref())?;
         }
         fts.commit()?;
 
@@ -178,6 +184,8 @@ impl ContextStorage for TursoStorage {
             .transpose()
             .map_err(|e| crate::Error::InvalidEntry(format!("metadata is not valid JSON: {e}")))?;
 
+        let mut evicted_id: Option<String> = None;
+
         let result = async {
             conn.execute("BEGIN IMMEDIATE", ()).await?;
 
@@ -203,12 +211,16 @@ impl ContextStorage for TursoStorage {
                 };
 
                 if count >= i64::try_from(max_entries).unwrap_or(i64::MAX) {
-                    conn.execute(
-                        "DELETE FROM entries WHERE id = \
-                         (SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1)",
-                        (),
-                    )
-                    .await?;
+                    let mut id_rows = conn
+                        .query("SELECT id FROM entries ORDER BY timestamp ASC LIMIT 1", ())
+                        .await?;
+                    if let Some(row) = id_rows.next().await? {
+                        if let turso::Value::Text(id) = row.get_value(0)? {
+                            conn.execute("DELETE FROM entries WHERE id = ?1", (id.clone(),))
+                                .await?;
+                            evicted_id = Some(id);
+                        }
+                    }
                 }
             }
 
@@ -243,7 +255,11 @@ impl ContextStorage for TursoStorage {
 
         // Turso write committed — update tantivy. If this fails the entry is
         // still persisted in turso; next startup rebuild will re-sync the index.
-        self.fts.add(&entry.id, &entry.content)?;
+        if let Some(id) = evicted_id {
+            self.fts.remove(&id)?;
+        }
+        self.fts
+            .add(&entry.id, &entry.content, entry.scope.as_deref())?;
         self.fts.commit()?;
 
         result

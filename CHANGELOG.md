@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **LRU eviction ghost entries:** `TursoStorage::save()` now captures the evicted entry's ID before the `DELETE` and calls `fts.remove()` after the turso commit, keeping the tantivy index in sync. Previously, evicted entries left ghost documents in tantivy that wasted BM25 score slots and degraded corpus statistics until the next restart.
+- **Scoped tantivy search starvation:** Tantivy now indexes `scope` as a `STRING` (raw/keyword) field. Scoped queries use a `BooleanQuery` combining the content query with an exact-match scope `TermQuery`, so `TopDocs` is already scope-filtered before returning. Previously, the global top-k could be entirely dominated by a different scope, crowding out valid results in the requested scope. The Rust-side scope filter and overfetch heuristic are removed.
+
 ## [0.6.0] - 2026-06-30
 
 ### Breaking Changes
