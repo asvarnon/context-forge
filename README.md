@@ -9,27 +9,20 @@ searchable memory across sessions.
 
 ## Installation
 
-> **Pre-release notice:** the current release is a `0.5.0-beta` pre-release
-> (see [crates.io](https://crates.io/crates/context-forge/versions) for the
-> latest beta). The public API may still change between betas based on
-> integration feedback. Pin the **exact** version — caret ranges and the bare
-> version string Cargo writes by default never match pre-release versions, so
-> an exact pin is required. Replace `<latest-beta>` below with the current
-> version:
->
-> ```toml
-> context-forge = "=0.5.0-<latest-beta>"
-> ```
+The current release is [`0.6.0` on crates.io](https://crates.io/crates/context-forge). This release is the async turso + Tantivy
+line; `0.5.x` was the final rusqlite/FTS5 line. Because the crate is still
+pre-1.0, applications that need reproducible behavior should pin the exact
+version:
 
 ```sh
-cargo add context-forge@=0.5.0-<latest-beta>
+cargo add context-forge@=0.6.0
 ```
 
 or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-context-forge = "=0.5.0-<latest-beta>"
+context-forge = "=0.6.0"
 ```
 
 ## Quick start
