@@ -1,5 +1,7 @@
 # Context Forge
 
+[![crates.io](https://img.shields.io/crates/v/context-forge.svg)](https://crates.io/crates/context-forge)
+
 A local-first persistent memory library for LLM applications. turso (async
 SQLite) + standalone Tantivy BM25 retrieval, recency-decay scoring, and
 token-budget-aware context assembly — no cloud dependency, fully async.
@@ -9,20 +11,17 @@ searchable memory across sessions.
 
 ## Installation
 
-The current release is [`0.6.0` on crates.io](https://crates.io/crates/context-forge). This release is the async turso + Tantivy
-line; `0.5.x` was the final rusqlite/FTS5 line. Because the crate is still
-pre-1.0, applications that need reproducible behavior should pin the exact
-version:
+Defaults to the latest published version:
 
 ```sh
-cargo add context-forge@=0.6.0
+cargo add context-forge
 ```
 
-or in `Cargo.toml`:
+To pin an exact version (recommended for production — see the badge above for
+the current release):
 
-```toml
-[dependencies]
-context-forge = "=0.6.0"
+```sh
+cargo add context-forge@=x.y.z
 ```
 
 ## Quick start
@@ -199,6 +198,5 @@ and local-LLM distillation via an OpenAI-compatible endpoint (`distill-http`).
 Live-validated against a Discord bot (Husk) across save/recall, BM25 ranking,
 restart persistence, scope isolation, and secret-scrubbing test scenarios.
 
-Storage is turso (async SQLite) + standalone Tantivy — rusqlite, r2d2, and
-FTS5 have been removed. This is a breaking API change from `0.5.x`: all public
-methods are now `async`.
+Storage is turso (async SQLite) + standalone Tantivy. All public methods are
+`async` — a tokio runtime is required.

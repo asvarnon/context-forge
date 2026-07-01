@@ -1,49 +1,68 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci-checks.yml
-
   release:
-    name: Create GitHub Release
-    needs: ci
+    name: Bump, test, tag, publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@v4
 
-      - name: Extract changelog for this version
-        id: changelog
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git identity
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          notes=$(awk "/^## \[$version\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md)
-          {
-            echo "notes<<EOF"
-            echo "$notes"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create release
-        uses: softprops/action-gh-release@da05d552573ad5c4c2f9c2fddba02a36e78f7e25 # v2
+      - name: Bump version in Cargo.toml
+        id: version
+        run: |
+          current=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          IFS='.' read -r major minor patch <<< "$current"
+          case "${{ inputs.bump }}" in
+            patch) new="${major}.${minor}.$((patch + 1))" ;;
+            minor) new="${major}.$((minor + 1)).0" ;;
+            major) new="$((major + 1)).0.0" ;;
+          esac
+          sed -i "s/^version = \"${current}\"/version = \"${new}\"/" Cargo.toml
+          echo "new=${new}" >> "$GITHUB_OUTPUT"
+
+      - name: Run CI checks
+        run: |
+          cargo fmt --check
+          cargo clippy -- -D warnings
+          cargo test
+
+      - name: Commit and tag
+        run: |
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release v${{ steps.version.outputs.new }}"
+          git tag "v${{ steps.version.outputs.new }}"
+          git push origin main
+          git push origin "v${{ steps.version.outputs.new }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          body: ${{ steps.changelog.notes }}
+          tag_name: "v${{ steps.version.outputs.new }}"
+          name: "v${{ steps.version.outputs.new }}"
           make_latest: true
 
-  publish:
-    name: Publish to crates.io
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish
+      - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
