@@ -88,7 +88,9 @@ async fn scope_starvation_regression() {
 
     for i in 0..120_usize {
         cf.save(
-            &format!("starship propulsion research entry {i} covering interstellar starship design"),
+            &format!(
+                "starship propulsion research entry {i} covering interstellar starship design"
+            ),
             kind::FACT,
             &scoped_options("guild:beta"),
         )

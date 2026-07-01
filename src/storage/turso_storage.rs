@@ -216,11 +216,8 @@ impl ContextStorage for TursoStorage {
                         .await?;
                     if let Some(row) = id_rows.next().await? {
                         if let turso::Value::Text(id) = row.get_value(0)? {
-                            conn.execute(
-                                "DELETE FROM entries WHERE id = ?1",
-                                (id.clone(),),
-                            )
-                            .await?;
+                            conn.execute("DELETE FROM entries WHERE id = ?1", (id.clone(),))
+                                .await?;
                             evicted_id = Some(id);
                         }
                     }
@@ -261,7 +258,8 @@ impl ContextStorage for TursoStorage {
         if let Some(id) = evicted_id {
             self.fts.remove(&id)?;
         }
-        self.fts.add(&entry.id, &entry.content, entry.scope.as_deref())?;
+        self.fts
+            .add(&entry.id, &entry.content, entry.scope.as_deref())?;
         self.fts.commit()?;
 
         result
