@@ -24,7 +24,8 @@ pub struct DefaultEnglishScorer(ConfigLexiconScorer);
 impl Default for DefaultEnglishScorer {
     fn default() -> Self {
         Self(
-            ConfigLexiconScorer::from_str(DEFAULT_ENGLISH_TOML)
+            DEFAULT_ENGLISH_TOML
+                .parse()
                 .expect("built-in English config is valid TOML"),
         )
     }

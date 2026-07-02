@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -77,19 +78,23 @@ pub struct ConfigLexiconScorer {
     config: LexiconConfig,
 }
 
-impl ConfigLexiconScorer {
-    /// Parse a scorer from a TOML string.
+impl FromStr for ConfigLexiconScorer {
+    type Err = Error;
+
+    /// Parse a scorer from a TOML string. Also available as `str::parse::<ConfigLexiconScorer>()`.
     ///
     /// # Errors
     ///
     /// Returns an error if the TOML is malformed or doesn't match the
     /// [`LexiconConfig`] schema.
-    pub fn from_str(toml: &str) -> Result<Self> {
-        let config = toml::from_str(toml)
+    fn from_str(s: &str) -> Result<Self> {
+        let config = toml::from_str(s)
             .map_err(|e| Error::Migration(format!("lexicon parse error: {e}")))?;
         Ok(Self { config })
     }
+}
 
+impl ConfigLexiconScorer {
     /// Load a scorer from a TOML file on disk.
     ///
     /// # Errors
@@ -98,7 +103,7 @@ impl ConfigLexiconScorer {
     pub fn from_file(path: &Path) -> Result<Self> {
         let toml = std::fs::read_to_string(path)
             .map_err(|e| Error::Migration(format!("lexicon file error: {e}")))?;
-        Self::from_str(&toml)
+        toml.parse()
     }
 }
 
@@ -169,6 +174,8 @@ impl LexiconScorer for ConfigLexiconScorer {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::entry::kind;
 
