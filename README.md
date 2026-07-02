@@ -9,6 +9,39 @@ token-budget-aware context assembly — no cloud dependency, fully async.
 Embed it in a bot, agent runtime, or MCP server that needs durable,
 searchable memory across sessions.
 
+## What this is
+
+Context Forge is a **deterministic, algorithmic memory layer** — not a language
+model, and not a wrapper around one. The query and assembly pipeline runs with no
+AI calls:
+
+```
+query → BM25 candidate set   (Tantivy, classical information retrieval)
+      → recency decay score   (exponential formula, configurable half-life)
+      → lexicon importance    (config-driven heuristics, CPU-only)
+      → [future] semantic similarity  (embedding cosine, CPU-only)
+      → token budget cut
+      → minimal high-signal context block
+```
+
+Every step is deterministic and fast. No randomness, no model inference, no
+network calls on the hot path. The goal is to be as **consistent and predictable
+as possible without AI input at query time** — a memory layer that sits between
+LLM calls rather than depending on them.
+
+The LLM is only involved at `distill_and_save` time: an explicit, amortized call
+you opt into when you want to compress a transcript into durable facts. One
+distillation produces structured memory retrieved cheaply on every future query.
+That asymmetry is intentional — many fast algorithmic retrievals per one
+deliberate LLM call.
+
+**Semantic search** (planned) will add embedding cosine similarity as a fourth
+ranking signal, catching entries that share meaning even when they share no words.
+It complements the pipeline; it does not replace the algorithmic layers. BM25,
+recency, and the lexicon handle explicit memory-intent signals (decisions,
+commitments, corrections, domain terms) that semantic similarity is not
+specifically designed to detect. The layers are additive.
+
 ## Installation
 
 Defaults to the latest published version:
