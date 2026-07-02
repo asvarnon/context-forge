@@ -73,6 +73,6 @@ mod tests {
     fn neutral_content_scores_zero() {
         let scorer = DefaultEnglishScorer::default();
         let boost = scorer.score(&entry("the quick brown fox jumps over the lazy dog"), "");
-        assert_eq!(boost, 0.0);
+        assert!(boost.abs() < f32::EPSILON);
     }
 }

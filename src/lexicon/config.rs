@@ -229,7 +229,7 @@ patterns = ["negative", "nay"]
     fn no_match_returns_zero() {
         let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
         let boost = scorer.score(&entry("nothing relevant here"), "");
-        assert_eq!(boost, 0.0);
+        assert!(boost.abs() < f32::EPSILON);
     }
 
     #[test]
@@ -250,14 +250,14 @@ patterns = ["negative", "nay"]
     fn empty_config_scores_zero() {
         let scorer = ConfigLexiconScorer::from_str("").unwrap();
         let boost = scorer.score(&entry("for the emperor and Astartes"), "");
-        assert_eq!(boost, 0.0);
+        assert!(boost.abs() < f32::EPSILON);
     }
 
     #[test]
     fn negation_window_suppresses_negated_affirmation() {
         let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
         let boost = scorer.score(&entry("that is not confirmed"), "");
-        assert_eq!(boost, 0.0, "negated affirmation should score zero");
+        assert!(boost.abs() < f32::EPSILON, "negated affirmation should score zero");
     }
 
     #[test]
