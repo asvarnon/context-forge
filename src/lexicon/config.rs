@@ -257,7 +257,10 @@ patterns = ["negative", "nay"]
     fn negation_window_suppresses_negated_affirmation() {
         let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
         let boost = scorer.score(&entry("that is not confirmed"), "");
-        assert!(boost.abs() < f32::EPSILON, "negated affirmation should score zero");
+        assert!(
+            boost.abs() < f32::EPSILON,
+            "negated affirmation should score zero"
+        );
     }
 
     #[test]
