@@ -87,8 +87,14 @@ patterns = ["the emperor frowns upon this"]
 
     let hits = cf.query(MATCH_ALL_QUERY, None, 10_000).await.unwrap();
     assert_eq!(hits.len(), 3);
-    assert_eq!(hits[0].id, persona_id, "persona-boosted entry should rank first");
-    assert_eq!(hits[1].id, english_id, "English-boosted entry should rank second");
+    assert_eq!(
+        hits[0].id, persona_id,
+        "persona-boosted entry should rank first"
+    );
+    assert_eq!(
+        hits[1].id, english_id,
+        "English-boosted entry should rank second"
+    );
     assert_eq!(hits[2].id, neutral_id, "neutral entry should rank last");
 }
 
@@ -113,7 +119,10 @@ async fn english_scorer_boosts_commissive_over_neutral() {
         .unwrap();
 
     let hits = cf.query(MATCH_ALL_QUERY, None, 10_000).await.unwrap();
-    assert_eq!(hits[0].id, commit_id, "commissive entry should outrank neutral");
+    assert_eq!(
+        hits[0].id, commit_id,
+        "commissive entry should outrank neutral"
+    );
     let _ = neutral_id;
 }
 

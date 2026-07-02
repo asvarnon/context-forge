@@ -75,12 +75,20 @@ patterns = [
 
     // Neutral — no lexicon signals.
     let neutral_id = cf
-        .save("the routine maintenance check was completed", kind::SNAPSHOT, &opts)
+        .save(
+            "the routine maintenance check was completed",
+            kind::SNAPSHOT,
+            &opts,
+        )
         .await?;
 
     // English signal — "confirmed" fires DefaultEnglishScorer (+0.5).
     let english_id = cf
-        .save("confirmed, the patrol route is clear", kind::SNAPSHOT, &opts)
+        .save(
+            "confirmed, the patrol route is clear",
+            kind::SNAPSHOT,
+            &opts,
+        )
         .await?;
 
     // Persona signal — "for the emperor" fires the WH40k affirmation (+0.5)
@@ -113,7 +121,10 @@ patterns = [
 
     // The persona entry should rank first (highest combined boost), the English
     // entry second, and the neutral entry last.
-    assert_eq!(hits[0].id, persona_id, "persona-signaled entry should rank first");
+    assert_eq!(
+        hits[0].id, persona_id,
+        "persona-signaled entry should rank first"
+    );
     assert_eq!(hits[2].id, neutral_id, "neutral entry should rank last");
 
     println!("\nRanking is correct — lexicon scoring is working.");
