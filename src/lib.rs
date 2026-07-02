@@ -55,6 +55,8 @@
 #![warn(clippy::pedantic)]
 #![warn(missing_docs)]
 
+/// [`ContextForgeBuilder`] — the opinionated construction path for [`ContextForge`].
+pub mod builder;
 /// Engine and scrub configuration types (`Config`, `EvictionPolicy`, `ScrubConfig`).
 pub mod config;
 /// Local-LLM distillation trait and the optional `distill-http` implementation.
@@ -90,6 +92,7 @@ pub use analysis::with_thread_cap;
 use std::path::Path;
 
 // Re-export primary types at crate root for convenience.
+pub use builder::ContextForgeBuilder;
 pub use config::{Config, EvictionPolicy};
 pub use distill::{
     merge_distilled, split_on_budget, ChunkingDistiller, DistilledMemory, Distiller, Fact,
@@ -99,8 +102,8 @@ pub use engine::{ContextEngine, SaveOptions, MATCH_ALL_QUERY};
 pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::Error;
 pub use lexicon::{
-    CompositeLexiconScorer, ConfigLexiconScorer, DefaultEnglishScorer, LexiconAppender,
-    LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
+    bootstrap_prompt, CompositeLexiconScorer, ConfigLexiconScorer, DefaultEnglishScorer,
+    LexiconAppender, LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
 };
 pub use scrub::{scrub_secrets, ScrubConfig};
 pub use session::{group_entries_by_session, SessionGroup};
@@ -120,6 +123,26 @@ pub struct ContextForge {
 }
 
 impl ContextForge {
+    /// Construct from already-built parts. Used by [`ContextForgeBuilder`].
+    pub(crate) fn from_parts(engine: ContextEngine, scrub_config: ScrubConfig) -> Self {
+        Self {
+            engine,
+            scrub_config,
+        }
+    }
+
+    /// Create a builder for `ContextForge`.
+    ///
+    /// The builder always pre-seeds [`DefaultEnglishScorer`] so plain-English
+    /// importance signals are active without any configuration. Use
+    /// [`ContextForgeBuilder::with_persona_scorer`] to stack a domain-specific
+    /// scorer on top. See also [`Self::open`] for the lower-level path that
+    /// wires no scorer.
+    #[must_use]
+    pub fn builder(config: Config) -> ContextForgeBuilder {
+        ContextForgeBuilder::new(config)
+    }
+
     /// Open (or create) the database at `config.db_path`, run any pending
     /// migrations, and build the engine.
     ///

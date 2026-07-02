@@ -113,35 +113,95 @@ durable storage.
 The library ships an always-on `DefaultEnglishScorer` that recognizes common
 English importance signals — confirmations (`"confirmed"`, `"that's right"`),
 importance flags (`"remember this"`, `"key point"`, `"deadline"`), decisions
-(`"we decided"`, `"final decision"`), dismissals (`"never mind"`, `"nevermind"`,
-`"nvm"`), and self-corrections (`"my mistake"`, `"scratch that"`).
+(`"we decided"`, `"final decision"`), commissives (`"i'll fix it"`, `"we committed
+to"`), dismissals (`"never mind"`, `"nevermind"`, `"nvm"`), and self-corrections
+(`"my mistake"`, `"scratch that"`).
 
 On top of that baseline, callers can inject a **persona lexicon** — a TOML file
-with domain-specific terms, affirmations, and negations that matter for their
-specific use case:
+with domain-specific terms, affirmations, and negations for their use case:
 
 ```toml
 # lexicon.toml
 [terms]
-"Omnissiah" = 1.3   # domain noun — boosted 30%
-"Astartes"  = 1.4
+"Omnissiah" = 0.9   # critical domain proper noun — nearly always high-value content
+"Astartes"  = 0.6   # strong domain noun — more often in important entries than not
+"bolter"    = 0.3   # mild domain term — appears in casual and important content alike
 
 [affirmations]
-patterns = ["for the emperor", "it shall be done"]
+patterns = ["for the emperor", "it shall be done", "affirmative, brother"]
 
 [negations]
-patterns = ["the emperor frowns upon this"]
+patterns = ["the emperor frowns upon this", "negative, battle-brother"]
 ```
 
-Load it with `ConfigLexiconScorer::from_file("lexicon.toml")` and pass it to the
-builder alongside the built-in English layer. The two scorers compose additively —
-both run on every entry, their boosts are summed, and the engine applies a `-1.0`
-floor so no entry is assigned a negative combined score.
+**Weight semantics:** term weights are additive boosts. The engine formula is
+`final_score = base × (1.0 + boost.clamp(-1.0, 2.0))`, so a weight of `0.3` adds
+30% (1.3×); `1.0` doubles the score (2.0×). The engine caps total boost at `2.0`
+(3.0× maximum). Weights must be in `(0.0, 1.5]` — the library rejects configs that
+exceed this range. Each affirmation match adds a fixed `+0.5`; each negation match
+subtracts `0.3`.
 
-**Platform-specific shorthands** (chat abbreviations like `nvm`, `smh`, `imo`,
-`mb`) are intentionally excluded from the English defaults — they are
-context-specific, not universal. Add them to your own lexicon file if your
-user base uses them:
+### Wiring it in via the builder
+
+Use `ContextForge::builder` to compose the English baseline with your persona lexicon:
+
+```rust
+use context_forge::{Config, ConfigLexiconScorer, ContextForge};
+
+let persona: ConfigLexiconScorer = std::fs::read_to_string("lexicon.toml")?
+    .parse()?;
+
+let cf = ContextForge::builder(config)
+    .with_persona_scorer(persona)
+    .build()
+    .await?;
+```
+
+Without `with_persona_scorer`, the builder still pre-seeds `DefaultEnglishScorer` —
+plain-English importance signals are always active. `ContextForge::open` (the
+lower-level path) wires no scorer at all.
+
+### Bootstrapping a persona lexicon with an LLM
+
+Writing a well-calibrated lexicon from scratch requires knowing what weight values
+mean in practice. The library provides `bootstrap_prompt` to generate a structured
+calibration prompt you can pass to any LLM:
+
+```rust
+use context_forge::bootstrap_prompt;
+
+let prompt = bootstrap_prompt("A Space Marine Chaplain from Warhammer 40k");
+// pass `prompt` to your LLM — the response is a fenced TOML block
+// extract the TOML, parse it, and save it to disk
+```
+
+The prompt instructs the model on the weight scale, which term lengths and speech
+acts are valid, what generic English signals to omit (already covered by the English
+baseline), and that rationale should appear as TOML inline comments rather than prose.
+The result is a `lexicon.toml` you can load with `ConfigLexiconScorer::from_file`.
+
+This generation happens once at setup time — no LLM call on the query path.
+
+### Growing the lexicon at runtime
+
+The lexicon is a living document. Use `LexiconAppender` to atomically append new
+terms discovered at runtime without corrupting the existing file:
+
+```rust
+use context_forge::{LexiconAppender, LexiconProposal};
+
+let appender = LexiconAppender::new("lexicon.toml");
+appender.append(&LexiconProposal {
+    term: "Battle-Sister".to_owned(),
+    weight: 0.7,
+    rationale: Some("confirmed important in 7 entries".to_owned()),
+    source_ids: vec![],
+})?;
+```
+
+**Platform-specific shorthands** (chat abbreviations like `smh`, `imo`, `mb`) are
+intentionally excluded from the English defaults — they are context-specific, not
+universal. Add them to your own lexicon file if your user base uses them:
 
 ```toml
 # abbreviations.toml — load alongside your persona lexicon
@@ -149,11 +209,8 @@ user base uses them:
 patterns = ["imo", "imho", "ngl", "tbh", "fr"]
 
 [negations]
-patterns = ["nvm", "smh", "mb", "lol no"]
+patterns = ["smh", "mb", "lol no"]
 ```
-
-The lexicon file is a living document — use `LexiconAppender` to atomically
-append new terms discovered at runtime without corrupting the existing file.
 
 ## Chunked distillation
 

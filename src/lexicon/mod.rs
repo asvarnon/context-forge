@@ -19,10 +19,12 @@
 //! are additive — the engine applies the `-1.0` floor clamp after fusion.
 
 pub use self::appender::{LexiconAppender, LexiconProposal};
+pub use self::bootstrap::bootstrap_prompt;
 pub use self::config::{ConfigLexiconScorer, LexiconConfig, LexiconPatterns};
 pub use self::defaults::DefaultEnglishScorer;
 
 mod appender;
+mod bootstrap;
 mod config;
 mod defaults;
 

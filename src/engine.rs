@@ -1,11 +1,13 @@
 //! Core business logic: assembly, scoring, and snapshot management.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::config::{Config, DEFAULT_RECENCY_HALF_LIFE_SECS};
 use crate::entry::ContextEntry;
 use crate::error::Error;
+use crate::lexicon::LexiconScorer;
 use crate::traits::{ContextStorage, Result, Searcher};
 
 /// Default candidate limit when fetching search results for assembly.
@@ -52,6 +54,7 @@ pub struct ContextEngine {
     storage: Box<dyn ContextStorage>,
     searcher: Box<dyn Searcher>,
     config: Config,
+    scorer: Option<Arc<dyn LexiconScorer>>,
 }
 
 impl ContextEngine {
@@ -74,7 +77,21 @@ impl ContextEngine {
             storage,
             searcher,
             config,
+            scorer: None,
         }
+    }
+
+    /// Attach a [`LexiconScorer`] to this engine.
+    ///
+    /// The scorer runs inside [`Self::assemble`] after BM25 + recency decay
+    /// and before the token-budget cut. Calling this again replaces the previous
+    /// scorer. Prefer constructing via [`crate::ContextForgeBuilder`], which
+    /// automatically composes [`crate::DefaultEnglishScorer`] with any
+    /// caller-provided persona scorer.
+    #[must_use]
+    pub fn with_scorer(mut self, scorer: Arc<dyn LexiconScorer>) -> Self {
+        self.scorer = Some(scorer);
+        self
     }
 
     /// Assemble context entries that fit within `token_budget`.
@@ -106,7 +123,12 @@ impl ContextEngine {
 
         let now = current_timestamp();
 
-        // Apply recency weighting using the configured half-life.
+        // Apply recency weighting using the configured half-life, then
+        // apply the lexicon importance boost (if a scorer is wired in).
+        //
+        // Formula: final = base_score * (1.0 + boost.max(-1.0))
+        // A boost of 0.0 leaves ranking unchanged; +1.0 doubles the score;
+        // -1.0 zeroes it (floor prevents negative final scores).
         let half_life = self.config.recency_half_life_secs;
         let mut weighted: Vec<(f64, ContextEntry)> = candidates
             .into_iter()
@@ -119,8 +141,13 @@ impl ContextEngine {
                 )]
                 let age = (now - se.entry.timestamp).max(0) as f64;
                 let decay = recency_decay(age, half_life);
-                let weighted_score = se.score * decay;
-                (weighted_score, se.entry)
+                let base_score = se.score * decay;
+                let boost = self
+                    .scorer
+                    .as_ref()
+                    .map_or(0.0_f32, |s| s.score(&se.entry, query));
+                let final_score = base_score * (1.0 + (f64::from(boost)).clamp(-1.0, 2.0));
+                (final_score, se.entry)
             })
             .collect();
 
@@ -592,6 +619,33 @@ mod tests {
                 "half_life {value} should have been clamped to default",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn lexicon_scorer_boosts_important_entry_over_neutral() {
+        use crate::lexicon::DefaultEnglishScorer;
+
+        let now = current_timestamp();
+        // Equal BM25 scores, equal timestamps — only differentiator is lexicon signal.
+        let results = vec![
+            make_scored("neutral", "something unrelated here", now, 1.0),
+            make_scored("important", "confirmed, that is correct", now, 1.0),
+        ];
+
+        let scorer: Arc<dyn LexiconScorer> = Arc::new(DefaultEnglishScorer::default());
+        let engine = ContextEngine::new(
+            Box::new(MockStorage::new()),
+            Box::new(MockSearcher::new(results)),
+            default_config(100),
+        )
+        .with_scorer(scorer);
+
+        let assembled = engine.assemble("test", None, 1000).await.unwrap();
+        assert_eq!(assembled.len(), 2);
+        assert_eq!(
+            assembled[0].id, "important",
+            "lexicon-boosted entry should rank first"
+        );
     }
 
     #[test]
