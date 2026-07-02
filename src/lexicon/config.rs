@@ -48,13 +48,30 @@ pub struct LexiconPatterns {
 
 /// [`LexiconScorer`] backed by a TOML config file.
 ///
-/// Term matching is **case-insensitive substring** — "Astartes" matches
-/// "the Astartes warriors" and "astartes legion". Multi-word terms work the
-/// same way.
+/// ## Matching
 ///
-/// Score is additive and uncapped on the positive side. On the negative side,
-/// the engine clamps the boost floor to `-1.0` so entries are never assigned
-/// a negative combined score.
+/// Pattern matching is **case-insensitive substring** with two normalizations
+/// applied before comparison:
+/// - Apostrophes are stripped from both content and pattern, so `"that's right"`
+///   matches `"thats right"` and vice versa.
+/// - A **3-token negation window** suppresses matches preceded within three
+///   whitespace-separated tokens by a negator (`not`, `never`, `don't`,
+///   `didn't`, `no`, `isn't`, `can't`, `cannot`, `won't`, `hardly`, `barely`).
+///   This prevents `"not confirmed"` from firing the `"confirmed"` affirmation.
+///
+/// ## Limitations
+///
+/// This is a **lexical heuristic, not a language model**. It does not perform
+/// syntactic parsing, sarcasm detection, discourse analysis, or full semantic
+/// interpretation. Known blind spots:
+/// - Deep negation stacking (`"I don't think this is not confirmed"`)
+/// - Pragmatic ambiguity (`"noted"` as genuine vs. cold acknowledgment)
+/// - Cross-sentence negation scope (the window is local to each pattern site)
+///
+/// The semantic search layer (embeddings) complements this scorer but does not
+/// replace it — embeddings handle vocabulary-agnostic retrieval; this scorer
+/// handles explicit memory-intent signals (commitments, decisions, corrections)
+/// that are not the same problem as semantic similarity.
 #[derive(Debug, Clone)]
 pub struct ConfigLexiconScorer {
     config: LexiconConfig,
@@ -85,29 +102,63 @@ impl ConfigLexiconScorer {
     }
 }
 
+/// Negation words used by the 3-token window check. Content is already
+/// lowercased and apostrophe-stripped before this runs, so contractions
+/// appear without apostrophes (`dont`, `didnt`, etc.).
+const NEGATORS: &[&str] = &[
+    "not", "never", "no", "dont", "didnt", "isnt", "wasnt", "cant", "cannot", "wont",
+    "hardly", "barely",
+];
+
+/// Returns `true` if `match_start` in `content` is immediately preceded
+/// (within 3 whitespace-separated tokens) by a negation word.
+fn is_negated(content: &str, match_start: usize) -> bool {
+    let prefix = &content[..match_start];
+    let tokens: Vec<&str> = prefix.split_whitespace().collect();
+    let window_start = tokens.len().saturating_sub(3);
+    tokens[window_start..].iter().any(|t| {
+        let word = t.trim_end_matches(|c: char| c.is_ascii_punctuation());
+        NEGATORS.contains(&word)
+    })
+}
+
+/// Returns `true` if `pattern` appears in `content` at least once without
+/// being immediately preceded by a negation word.
+fn has_non_negated_match(content: &str, pattern: &str) -> bool {
+    let mut start = 0;
+    while let Some(rel) = content[start..].find(pattern) {
+        let pos = start + rel;
+        if !is_negated(content, pos) {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
+
 impl LexiconScorer for ConfigLexiconScorer {
     fn score(&self, entry: &ContextEntry, _query: &str) -> f32 {
-        // Normalize apostrophes so "that's right" matches "thats right" and vice versa.
-        let content_lower = entry.content.to_lowercase().replace('\'', "");
+        // Normalize: lowercase + strip apostrophes so "that's right" matches "thats right".
+        let content = entry.content.to_lowercase().replace('\'', "");
         let mut boost = 0.0_f32;
 
         for (term, weight) in &self.config.terms {
             let term_norm = term.to_lowercase().replace('\'', "");
-            if content_lower.contains(term_norm.as_str()) {
+            if has_non_negated_match(&content, &term_norm) {
                 boost += weight;
             }
         }
 
         for pattern in &self.config.affirmations.patterns {
             let pat_norm = pattern.to_lowercase().replace('\'', "");
-            if content_lower.contains(pat_norm.as_str()) {
+            if has_non_negated_match(&content, &pat_norm) {
                 boost += 0.5;
             }
         }
 
         for pattern in &self.config.negations.patterns {
             let pat_norm = pattern.to_lowercase().replace('\'', "");
-            if content_lower.contains(pat_norm.as_str()) {
+            if has_non_negated_match(&content, &pat_norm) {
                 boost -= 0.3;
             }
         }
@@ -140,7 +191,7 @@ mod tests {
 "Astartes"  = 1.4
 
 [affirmations]
-patterns = ["for the emperor", "it shall be done"]
+patterns = ["for the emperor", "it shall be done", "confirmed"]
 
 [negations]
 patterns = ["negative", "nay"]
@@ -150,7 +201,7 @@ patterns = ["negative", "nay"]
     fn from_str_parses_valid_toml() {
         let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
         assert_eq!(scorer.config.terms.len(), 2);
-        assert_eq!(scorer.config.affirmations.patterns.len(), 2);
+        assert_eq!(scorer.config.affirmations.patterns.len(), 3);
         assert_eq!(scorer.config.negations.patterns.len(), 2);
     }
 
@@ -193,5 +244,35 @@ patterns = ["negative", "nay"]
         let scorer = ConfigLexiconScorer::from_str("").unwrap();
         let boost = scorer.score(&entry("for the emperor and Astartes"), "");
         assert_eq!(boost, 0.0);
+    }
+
+    #[test]
+    fn negation_window_suppresses_negated_affirmation() {
+        let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
+        let boost = scorer.score(&entry("that is not confirmed"), "");
+        assert_eq!(boost, 0.0, "negated affirmation should score zero");
+    }
+
+    #[test]
+    fn unnegated_affirmation_still_boosts() {
+        let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
+        let boost = scorer.score(&entry("yes that is confirmed"), "");
+        assert!(boost > 0.0, "un-negated affirmation should boost");
+    }
+
+    #[test]
+    fn negation_window_does_not_suppress_distant_negator() {
+        let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
+        // "not" is 4 tokens before "confirmed" — outside the 3-token window
+        let boost = scorer.score(&entry("not sure about many things but confirmed"), "");
+        assert!(boost > 0.0, "negator outside window should not suppress");
+    }
+
+    #[test]
+    fn apostrophe_normalization_matches_contraction_variants() {
+        let scorer = ConfigLexiconScorer::from_str(SAMPLE_TOML).unwrap();
+        // "for the emperor" has no apostrophe but tests the normalization path
+        let boost_with = scorer.score(&entry("for the emperor, confirmed"), "");
+        assert!(boost_with > 0.0);
     }
 }

@@ -10,9 +10,13 @@
 # No [terms] section — importance terms are domain-specific; there are no
 # generically important English words. Add domain terms in your persona lexicon.
 #
-# Matching is case-insensitive substring. Single words are only used when they
-# are not substrings of their opposites in common usage (e.g. "confirmed" is
-# safe; "correct" is not because it appears inside "incorrect").
+# Matching is case-insensitive substring with apostrophe normalization (so
+# "that's right" matches "thats right") and a 3-token negation window (so
+# "not confirmed" does NOT fire the "confirmed" affirmation).
+#
+# Platform-specific abbreviations (nvm, smh, mb, imo) are intentionally
+# excluded — add them to a separate lexicon loaded alongside this one if
+# your user base uses them.
 
 [affirmations]
 patterns = [
@@ -56,7 +60,6 @@ patterns = [
     "we agree",
     "noted",
     "acknowledged",
-    "copy that",
     "that makes sense",
     "makes sense to me",
     "i understand",
@@ -91,6 +94,44 @@ patterns = [
     "top priority",
     "time-sensitive",
     "deadline",
+
+    # --- Commitments and future obligations ---
+    # These are commissive speech acts — the most important category for a
+    # memory system. "I'll fix it tomorrow" is high-value; it must be recalled.
+    "i'll fix it",
+    "i'll handle it",
+    "i'll take care of it",
+    "i'll get back to you",
+    "i'll look into it",
+    "i'll make sure",
+    "i'll follow up",
+    "i won't forget",
+    "we'll address this",
+    "we'll handle it",
+    "we committed to",
+    "i promise",
+
+    # --- Clarification markers ---
+    # The speaker is issuing the authoritative version of something said before.
+    # Content following these markers is often more important than what preceded.
+    "to clarify",
+    "to be clear",
+    "what i mean is",
+    "what i meant is",
+    "in other words",
+    "let me rephrase",
+    "more precisely",
+    "the point is",
+    "what i'm saying is",
+
+    # --- Evidentiality: first-hand verification ---
+    # First-hand evidence is higher credibility than hearsay.
+    "i verified",
+    "i tested",
+    "i checked",
+    "i looked it up",
+    "i reproduced it",
+    "i validated",
 ]
 
 [negations]
@@ -140,7 +181,6 @@ patterns = [
     "ignore my last",
     "actually, no",
     "wait, no",
-    "on second thought",
 
     # --- Failure / non-resolution ---
     "that didn't work",
