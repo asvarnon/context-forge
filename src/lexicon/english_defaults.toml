@@ -1,0 +1,191 @@
+# Default English importance signals — always-on baseline for plain-English
+# conversations. Applies regardless of any persona scorer the caller provides.
+#
+# Affirmations: phrases that confirm, validate, or flag content as important.
+# Each match adds +0.5 to the entry's boost.
+#
+# Negations: phrases that deny, dismiss, correct, or retract content.
+# Each match subtracts 0.3 from the entry's boost.
+#
+# No [terms] section — importance terms are domain-specific; there are no
+# generically important English words. Add domain terms in your persona lexicon.
+#
+# Matching is case-insensitive substring with apostrophe normalization (so
+# "that's right" matches "thats right") and a 3-token negation window (so
+# "not confirmed" does NOT fire the "confirmed" affirmation).
+#
+# Platform-specific abbreviations (nvm, smh, mb, imo) are intentionally
+# excluded — add them to a separate lexicon loaded alongside this one if
+# your user base uses them.
+
+[affirmations]
+patterns = [
+    # --- Explicit memory / importance flags (highest signal) ---
+    "remember this",
+    "don't forget",
+    "take note",
+    "note this",
+    "make note of this",
+    "keep in mind",
+    "bear in mind",
+    "worth noting",
+    "worth remembering",
+    "this is important",
+    "this matters",
+    "key point",
+    "important point",
+    "key takeaway",
+    "main takeaway",
+    "bottom line",
+    "pay attention to this",
+    "heads up",
+
+    # --- Direct confirmation ---
+    "confirmed",
+    "that's correct",
+    "that is correct",
+    "you're correct",
+    "you are correct",
+    "that's right",
+    "that is right",
+    "you're right",
+    "you are right",
+    "exactly right",
+    "spot on",
+    "absolutely right",
+    "that's exactly it",
+
+    # --- Agreement and acknowledgment ---
+    "i agree",
+    "we agree",
+    "noted",
+    "acknowledged",
+    "that makes sense",
+    "makes sense to me",
+    "i understand",
+
+    # --- Peer validation ---
+    "good point",
+    "valid point",
+    "great point",
+    "excellent point",
+    "fair point",
+    "well said",
+
+    # --- Decision markers (high signal for memory systems) ---
+    "we decided",
+    "it was decided",
+    "decision made",
+    "we'll go with",
+    "final decision",
+    "final answer",
+    "agreed to",
+
+    # --- Resolution / success ---
+    "problem solved",
+    "issue resolved",
+    "that worked",
+    "works now",
+    "that fixed it",
+    "all sorted",
+
+    # --- Priority / urgency signals ---
+    "high priority",
+    "top priority",
+    "time-sensitive",
+    "deadline",
+
+    # --- Commitments and future obligations ---
+    # These are commissive speech acts — the most important category for a
+    # memory system. "I'll fix it tomorrow" is high-value; it must be recalled.
+    "i'll fix it",
+    "i'll handle it",
+    "i'll take care of it",
+    "i'll get back to you",
+    "i'll look into it",
+    "i'll make sure",
+    "i'll follow up",
+    "i won't forget",
+    "we'll address this",
+    "we'll handle it",
+    "we committed to",
+    "i promise",
+
+    # --- Clarification markers ---
+    # The speaker is issuing the authoritative version of something said before.
+    # Content following these markers is often more important than what preceded.
+    "to clarify",
+    "to be clear",
+    "what i mean is",
+    "what i meant is",
+    "in other words",
+    "let me rephrase",
+    "more precisely",
+    "the point is",
+    "what i'm saying is",
+
+    # --- Evidentiality: first-hand verification ---
+    # First-hand evidence is higher credibility than hearsay.
+    "i verified",
+    "i tested",
+    "i checked",
+    "i looked it up",
+    "i reproduced it",
+    "i validated",
+]
+
+[negations]
+patterns = [
+    # --- Explicit dismissals ---
+    "never mind",
+    "nevermind",
+    "nvm",
+    "disregard",
+    "ignore that",
+    "scratch that",
+    "forget that",
+    "cancel that",
+    "skip that",
+    "doesn't matter",
+    "it doesn't matter",
+    "not important",
+    "this doesn't matter",
+    "irrelevant",
+    "beside the point",
+    "never mind that",
+
+    # --- Direct corrections / disagreements ---
+    "that's wrong",
+    "that is wrong",
+    "you're wrong",
+    "you are wrong",
+    "that's not right",
+    "that is not right",
+    "that's not correct",
+    "that is not correct",
+    "incorrect",
+    "i disagree",
+    "not quite right",
+
+    # --- Self-corrections and retractions (marks prior content as wrong) ---
+    "i was wrong",
+    "my mistake",
+    "my bad",
+    "i misspoke",
+    "i made a mistake",
+    "to correct myself",
+    "i take that back",
+    "retract that",
+    "scratch what i said",
+    "forget what i said",
+    "ignore my last",
+    "actually, no",
+    "wait, no",
+
+    # --- Failure / non-resolution ---
+    "that didn't work",
+    "that doesn't work",
+    "still broken",
+    "still not working",
+    "that failed",
+]

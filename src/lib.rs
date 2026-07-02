@@ -74,6 +74,11 @@ pub mod storage;
 /// `ContextStorage` and `Searcher` traits, and the crate's `Result` alias.
 pub mod traits;
 
+/// Lexicon-based importance scoring — [`LexiconScorer`] trait, [`ConfigLexiconScorer`],
+/// [`DefaultEnglishScorer`], [`CompositeLexiconScorer`], [`LexiconAppender`], and
+/// [`LexiconProposal`].
+pub mod lexicon;
+
 /// Importance-detection pipeline (tokenizer, lexicon, scoring). Pure
 /// computation, no I/O. Enabled by the `analysis` feature (default).
 #[cfg(feature = "analysis")]
@@ -93,6 +98,10 @@ pub use distill::{
 pub use engine::{ContextEngine, SaveOptions, MATCH_ALL_QUERY};
 pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::Error;
+pub use lexicon::{
+    CompositeLexiconScorer, ConfigLexiconScorer, DefaultEnglishScorer, LexiconAppender,
+    LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
+};
 pub use scrub::{scrub_secrets, ScrubConfig};
 pub use session::{group_entries_by_session, SessionGroup};
 pub use storage::{open_storage, TursoSearcher, TursoStorage};

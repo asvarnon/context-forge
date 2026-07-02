@@ -9,6 +9,39 @@ token-budget-aware context assembly — no cloud dependency, fully async.
 Embed it in a bot, agent runtime, or MCP server that needs durable,
 searchable memory across sessions.
 
+## What this is
+
+Context Forge is a **deterministic, algorithmic memory layer** — not a language
+model, and not a wrapper around one. The query and assembly pipeline runs with no
+AI calls:
+
+```
+query → BM25 candidate set   (Tantivy, classical information retrieval)
+      → recency decay score   (exponential formula, configurable half-life)
+      → lexicon importance    (config-driven heuristics, CPU-only)
+      → [future] semantic similarity  (embedding cosine, CPU-only)
+      → token budget cut
+      → minimal high-signal context block
+```
+
+Every step is deterministic and fast. No randomness, no model inference, no
+network calls on the hot path. The goal is to be as **consistent and predictable
+as possible without AI input at query time** — a memory layer that sits between
+LLM calls rather than depending on them.
+
+The LLM is only involved at `distill_and_save` time: an explicit, amortized call
+you opt into when you want to compress a transcript into durable facts. One
+distillation produces structured memory retrieved cheaply on every future query.
+That asymmetry is intentional — many fast algorithmic retrievals per one
+deliberate LLM call.
+
+**Semantic search** (planned) will add embedding cosine similarity as a fourth
+ranking signal, catching entries that share meaning even when they share no words.
+It complements the pipeline; it does not replace the algorithmic layers. BM25,
+recency, and the lexicon handle explicit memory-intent signals (decisions,
+commitments, corrections, domain terms) that semantic similarity is not
+specifically designed to detect. The layers are additive.
+
 ## Installation
 
 Defaults to the latest published version:
@@ -74,6 +107,53 @@ durable storage.
 | `analysis` | yes | `stop-words` | Importance-detection pipeline — tokenizer, lexicon, n-grams, recurrence, classification, scoring. |
 | `parallel` | no | `rayon` | Opt-in rayon parallelism for the `analysis` pipeline (per-session term maps, classification, scoring). The library never configures the global rayon pool. |
 | `distill-http` | no | `reqwest` | OpenAI-compatible local-LLM distillation (Ollama/llama-server). |
+
+## Lexicon scoring
+
+The library ships an always-on `DefaultEnglishScorer` that recognizes common
+English importance signals — confirmations (`"confirmed"`, `"that's right"`),
+importance flags (`"remember this"`, `"key point"`, `"deadline"`), decisions
+(`"we decided"`, `"final decision"`), dismissals (`"never mind"`, `"nevermind"`,
+`"nvm"`), and self-corrections (`"my mistake"`, `"scratch that"`).
+
+On top of that baseline, callers can inject a **persona lexicon** — a TOML file
+with domain-specific terms, affirmations, and negations that matter for their
+specific use case:
+
+```toml
+# lexicon.toml
+[terms]
+"Omnissiah" = 1.3   # domain noun — boosted 30%
+"Astartes"  = 1.4
+
+[affirmations]
+patterns = ["for the emperor", "it shall be done"]
+
+[negations]
+patterns = ["the emperor frowns upon this"]
+```
+
+Load it with `ConfigLexiconScorer::from_file("lexicon.toml")` and pass it to the
+builder alongside the built-in English layer. The two scorers compose additively —
+both run on every entry, their boosts are summed, and the engine applies a `-1.0`
+floor so no entry is assigned a negative combined score.
+
+**Platform-specific shorthands** (chat abbreviations like `nvm`, `smh`, `imo`,
+`mb`) are intentionally excluded from the English defaults — they are
+context-specific, not universal. Add them to your own lexicon file if your
+user base uses them:
+
+```toml
+# abbreviations.toml — load alongside your persona lexicon
+[affirmations]
+patterns = ["imo", "imho", "ngl", "tbh", "fr"]
+
+[negations]
+patterns = ["nvm", "smh", "mb", "lol no"]
+```
+
+The lexicon file is a living document — use `LexiconAppender` to atomically
+append new terms discovered at runtime without corrupting the existing file.
 
 ## Chunked distillation
 
