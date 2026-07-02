@@ -1,0 +1,151 @@
+# Default English importance signals — always-on baseline for plain-English
+# conversations. Applies regardless of any persona scorer the caller provides.
+#
+# Affirmations: phrases that confirm, validate, or flag content as important.
+# Each match adds +0.5 to the entry's boost.
+#
+# Negations: phrases that deny, dismiss, correct, or retract content.
+# Each match subtracts 0.3 from the entry's boost.
+#
+# No [terms] section — importance terms are domain-specific; there are no
+# generically important English words. Add domain terms in your persona lexicon.
+#
+# Matching is case-insensitive substring. Single words are only used when they
+# are not substrings of their opposites in common usage (e.g. "confirmed" is
+# safe; "correct" is not because it appears inside "incorrect").
+
+[affirmations]
+patterns = [
+    # --- Explicit memory / importance flags (highest signal) ---
+    "remember this",
+    "don't forget",
+    "take note",
+    "note this",
+    "make note of this",
+    "keep in mind",
+    "bear in mind",
+    "worth noting",
+    "worth remembering",
+    "this is important",
+    "this matters",
+    "key point",
+    "important point",
+    "key takeaway",
+    "main takeaway",
+    "bottom line",
+    "pay attention to this",
+    "heads up",
+
+    # --- Direct confirmation ---
+    "confirmed",
+    "that's correct",
+    "that is correct",
+    "you're correct",
+    "you are correct",
+    "that's right",
+    "that is right",
+    "you're right",
+    "you are right",
+    "exactly right",
+    "spot on",
+    "absolutely right",
+    "that's exactly it",
+
+    # --- Agreement and acknowledgment ---
+    "i agree",
+    "we agree",
+    "noted",
+    "acknowledged",
+    "copy that",
+    "that makes sense",
+    "makes sense to me",
+    "i understand",
+
+    # --- Peer validation ---
+    "good point",
+    "valid point",
+    "great point",
+    "excellent point",
+    "fair point",
+    "well said",
+
+    # --- Decision markers (high signal for memory systems) ---
+    "we decided",
+    "it was decided",
+    "decision made",
+    "we'll go with",
+    "final decision",
+    "final answer",
+    "agreed to",
+
+    # --- Resolution / success ---
+    "problem solved",
+    "issue resolved",
+    "that worked",
+    "works now",
+    "that fixed it",
+    "all sorted",
+
+    # --- Priority / urgency signals ---
+    "high priority",
+    "top priority",
+    "time-sensitive",
+    "deadline",
+]
+
+[negations]
+patterns = [
+    # --- Explicit dismissals ---
+    "never mind",
+    "nevermind",
+    "nvm",
+    "disregard",
+    "ignore that",
+    "scratch that",
+    "forget that",
+    "cancel that",
+    "skip that",
+    "doesn't matter",
+    "it doesn't matter",
+    "not important",
+    "this doesn't matter",
+    "irrelevant",
+    "beside the point",
+    "never mind that",
+
+    # --- Direct corrections / disagreements ---
+    "that's wrong",
+    "that is wrong",
+    "you're wrong",
+    "you are wrong",
+    "that's not right",
+    "that is not right",
+    "that's not correct",
+    "that is not correct",
+    "incorrect",
+    "i disagree",
+    "not quite right",
+
+    # --- Self-corrections and retractions (marks prior content as wrong) ---
+    "i was wrong",
+    "my mistake",
+    "my bad",
+    "i misspoke",
+    "i made a mistake",
+    "to correct myself",
+    "i take that back",
+    "retract that",
+    "scratch what i said",
+    "forget what i said",
+    "ignore my last",
+    "actually, no",
+    "wait, no",
+    "on second thought",
+
+    # --- Failure / non-resolution ---
+    "that didn't work",
+    "that doesn't work",
+    "still broken",
+    "still not working",
+    "that failed",
+]
