@@ -102,8 +102,8 @@ pub use engine::{ContextEngine, SaveOptions, MATCH_ALL_QUERY};
 pub use entry::{kind, ContextEntry, ScoredEntry};
 pub use error::Error;
 pub use lexicon::{
-    CompositeLexiconScorer, ConfigLexiconScorer, DefaultEnglishScorer, LexiconAppender,
-    LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
+    bootstrap_prompt, CompositeLexiconScorer, ConfigLexiconScorer, DefaultEnglishScorer,
+    LexiconAppender, LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
 };
 pub use scrub::{scrub_secrets, ScrubConfig};
 pub use session::{group_entries_by_session, SessionGroup};

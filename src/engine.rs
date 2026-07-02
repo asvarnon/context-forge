@@ -146,7 +146,7 @@ impl ContextEngine {
                     .scorer
                     .as_ref()
                     .map_or(0.0_f32, |s| s.score(&se.entry, query));
-                let final_score = base_score * (1.0 + (f64::from(boost)).max(-1.0));
+                let final_score = base_score * (1.0 + (f64::from(boost)).clamp(-1.0, 2.0));
                 (final_score, se.entry)
             })
             .collect();

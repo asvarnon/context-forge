@@ -25,7 +25,11 @@ use super::LexiconScorer;
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct LexiconConfig {
     /// Domain-specific terms mapped to their importance weight.
-    /// Weight is additive boost (e.g. `1.3` means 30% extra importance).
+    ///
+    /// Weight is an additive boost applied directly to the combined score via
+    /// `final_score = base × (1.0 + boost.clamp(-1.0, 2.0))`. A weight of `0.3`
+    /// adds 30% to the base score (1.3×); `1.0` doubles it (2.0×). Weights must
+    /// be in `(0.0, 1.5]` — the engine caps total boost at `2.0` (3.0× maximum).
     #[serde(default)]
     pub terms: HashMap<String, f32>,
 
@@ -88,8 +92,19 @@ impl FromStr for ConfigLexiconScorer {
     /// Returns an error if the TOML is malformed or doesn't match the
     /// [`LexiconConfig`] schema.
     fn from_str(s: &str) -> Result<Self> {
-        let config =
+        let config: LexiconConfig =
             toml::from_str(s).map_err(|e| Error::Migration(format!("lexicon parse error: {e}")))?;
+
+        for (term, &weight) in &config.terms {
+            if weight <= 0.0 || weight > 1.5 {
+                return Err(Error::Migration(format!(
+                    "lexicon term {term:?} has weight {weight}, \
+                     but weights must be in (0.0, 1.5] \
+                     (engine caps total boost at 2.0, giving 3.0× maximum)"
+                )));
+            }
+        }
+
         Ok(Self { config })
     }
 }
@@ -216,6 +231,30 @@ patterns = ["negative", "nay"]
     fn from_str_errors_on_malformed_toml() {
         let result = ConfigLexiconScorer::from_str("[[[[not valid toml");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_str_rejects_weight_above_max() {
+        let toml = "[terms]\n\"Heresy\" = 2.0";
+        let err = ConfigLexiconScorer::from_str(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Heresy"),
+            "error should name the offending term"
+        );
+        assert!(msg.contains('2'), "error should mention the invalid weight");
+    }
+
+    #[test]
+    fn from_str_rejects_nonpositive_weight() {
+        let toml = "[terms]\n\"Heresy\" = 0.0";
+        assert!(ConfigLexiconScorer::from_str(toml).is_err());
+    }
+
+    #[test]
+    fn from_str_accepts_weight_at_boundary() {
+        let toml = "[terms]\n\"Emperor\" = 1.5";
+        assert!(ConfigLexiconScorer::from_str(toml).is_ok());
     }
 
     #[test]
