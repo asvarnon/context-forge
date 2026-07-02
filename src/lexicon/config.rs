@@ -88,8 +88,8 @@ impl FromStr for ConfigLexiconScorer {
     /// Returns an error if the TOML is malformed or doesn't match the
     /// [`LexiconConfig`] schema.
     fn from_str(s: &str) -> Result<Self> {
-        let config = toml::from_str(s)
-            .map_err(|e| Error::Migration(format!("lexicon parse error: {e}")))?;
+        let config =
+            toml::from_str(s).map_err(|e| Error::Migration(format!("lexicon parse error: {e}")))?;
         Ok(Self { config })
     }
 }
@@ -111,8 +111,8 @@ impl ConfigLexiconScorer {
 /// lowercased and apostrophe-stripped before this runs, so contractions
 /// appear without apostrophes (`dont`, `didnt`, etc.).
 const NEGATORS: &[&str] = &[
-    "not", "never", "no", "dont", "didnt", "isnt", "wasnt", "cant", "cannot", "wont",
-    "hardly", "barely",
+    "not", "never", "no", "dont", "didnt", "isnt", "wasnt", "cant", "cannot", "wont", "hardly",
+    "barely",
 ];
 
 /// Returns `true` if `match_start` in `content` is immediately preceded
