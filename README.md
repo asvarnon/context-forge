@@ -3,8 +3,9 @@
 [![crates.io](https://img.shields.io/crates/v/context-forge.svg)](https://crates.io/crates/context-forge)
 
 A local-first persistent memory library for LLM applications. turso (async
-SQLite) + standalone Tantivy BM25 retrieval, recency-decay scoring, and
-token-budget-aware context assembly — no cloud dependency, fully async.
+SQLite) + standalone Tantivy BM25 retrieval + fastembed semantic search,
+recency-decay scoring, and token-budget-aware context assembly — no cloud
+dependency, fully async.
 
 Embed it in a bot, agent runtime, or MCP server that needs durable,
 searchable memory across sessions.
@@ -16,10 +17,11 @@ model, and not a wrapper around one. The query and assembly pipeline runs with n
 AI calls:
 
 ```
-query → BM25 candidate set   (Tantivy, classical information retrieval)
-      → recency decay score   (exponential formula, configurable half-life)
-      → lexicon importance    (config-driven heuristics, CPU-only)
-      → [future] semantic similarity  (embedding cosine, CPU-only)
+query → BM25 candidate set        (Tantivy, classical information retrieval)
+      + semantic candidate set     (fastembed all-MiniLM-L6-v2, cosine similarity)
+      → RRF score fusion           (Reciprocal Rank Fusion, k=60, full union)
+      → recency decay score        (exponential formula, configurable half-life)
+      → lexicon importance         (config-driven heuristics, CPU-only)
       → token budget cut
       → minimal high-signal context block
 ```
@@ -35,12 +37,14 @@ distillation produces structured memory retrieved cheaply on every future query.
 That asymmetry is intentional — many fast algorithmic retrievals per one
 deliberate LLM call.
 
-**Semantic search** (planned) will add embedding cosine similarity as a fourth
-ranking signal, catching entries that share meaning even when they share no words.
-It complements the pipeline; it does not replace the algorithmic layers. BM25,
-recency, and the lexicon handle explicit memory-intent signals (decisions,
-commitments, corrections, domain terms) that semantic similarity is not
-specifically designed to detect. The layers are additive.
+**Semantic search** (opt-in via the `semantic` feature) adds embedding cosine
+similarity as a ranking signal, catching entries that share meaning even when
+they share no words. Both BM25 and semantic candidates feed into Reciprocal Rank
+Fusion before recency and lexicon scoring — the full union of both result sets is
+considered, not just a re-ranking of BM25 results. BM25, recency, and the lexicon
+handle explicit memory-intent signals (decisions, commitments, corrections, domain
+terms) that semantic similarity is not specifically designed to detect. The layers
+are additive.
 
 ## Installation
 
@@ -102,11 +106,62 @@ durable storage.
 
 ## Feature flags
 
-| Feature | Default | Pulls in | Status |
+| Feature | Default | Pulls in | Notes |
 |---|---|---|---|
 | `analysis` | yes | `stop-words` | Importance-detection pipeline — tokenizer, lexicon, n-grams, recurrence, classification, scoring. |
-| `parallel` | no | `rayon` | Opt-in rayon parallelism for the `analysis` pipeline (per-session term maps, classification, scoring). The library never configures the global rayon pool. |
+| `parallel` | no | `rayon` | Opt-in rayon parallelism for the `analysis` pipeline. The library never configures the global rayon pool. |
 | `distill-http` | no | `reqwest` | OpenAI-compatible local-LLM distillation (Ollama/llama-server). |
+| `semantic` | no | `fastembed` | Hybrid BM25 + semantic search via fastembed (all-MiniLM-L6-v2, ONNX Runtime). Downloads ~22 MB model weights on first use. |
+
+## Semantic search
+
+Enable the `semantic` feature to add vector similarity as a ranking signal
+alongside BM25. Uses `all-MiniLM-L6-v2` (384-dim, ~22 MB ONNX weights) via
+fastembed. Model weights are downloaded automatically on first use to a
+configurable cache directory; subsequent startups load from cache.
+
+### Wiring it in
+
+Use `ContextForge::builder` and call `with_embedding_model`:
+
+```rust
+use context_forge::{Config, ContextForge};
+use std::path::PathBuf;
+
+let mut config = Config::default();
+config.db_path = PathBuf::from("memory.db");
+
+// Model weights are cached in the `models/` directory alongside the DB.
+let cf = ContextForge::builder(config)
+    .with_embedding_model("models/")
+    .build()
+    .await?;
+```
+
+New entries are embedded automatically at save time. `query()` runs both BM25
+and semantic search in parallel, fusing results via RRF — no API change needed.
+
+### Backfilling existing entries
+
+If you enable semantic search on a database that already has entries, call
+`backfill_embeddings` once at startup to index the pre-existing content:
+
+```rust
+let embedded = cf.backfill_embeddings(32, |done, total| {
+    eprintln!("backfill: {done}/{total}");
+}).await?;
+```
+
+`batch_size` controls how many entries are sent to the ONNX model per inference
+call. 32 is a good default. The callback receives `(done, total)` after each
+batch. Returns the number of entries successfully embedded.
+
+### Runtime note
+
+ONNX inference is CPU-bound and blocking. The library wraps all embedding calls
+in `tokio::task::spawn_blocking` — the async runtime is never blocked. The
+multi-thread tokio flavor is required when using `semantic` alongside
+`distill-http` (both features use blocking tasks internally).
 
 ## Lexicon scoring
 
@@ -306,16 +361,22 @@ anything found in it.
 
 ## Architecture
 
-- `engine` — `ContextEngine::assemble`: BM25 search via the `Searcher` trait,
-  then recency decay (`score * 0.5^(age_seconds / half_life)`, default
-  half-life 259,200s / 72h, configurable via `Config`), then sort by weighted
-  score descending, then greedy bin-pack into the token budget. Oversized
-  entries are skipped, not aborting. Also owns `save_snapshot`. No I/O.
+- `engine` — `ContextEngine::assemble`: runs BM25 and semantic search (when
+  enabled), fuses candidates via Reciprocal Rank Fusion (k=60, full union),
+  then applies recency decay (`0.5^(age_seconds / half_life)`, default
+  half-life 259,200s / 72h), then lexicon boost, then greedy bin-pack into the
+  token budget. Oversized entries are skipped, not aborting. Also owns
+  `save_snapshot`, which triggers embedding generation non-fatally after each
+  write. No I/O.
 - `storage` — turso (async SQLite) for persistence, standalone Tantivy for
   in-memory BM25 indexing. Dual-write on save: turso commits to disk, tantivy
   updates the in-memory index. On open, the tantivy index is rebuilt from
   turso (linear startup cost, negligible for small corpora). turso is the
-  source of truth; tantivy is a derived index.
+  source of truth; tantivy is a derived index. When `semantic` is enabled,
+  entries also carry a `vector32` embedding column queried via
+  `vector_distance_cos` — no separate vector store needed.
+- `semantic` (feature `semantic`) — `Embedder` trait and `FasEmbedder`
+  (fastembed + ONNX Runtime). Embedding calls run inside `spawn_blocking`.
 - `analysis` (feature `analysis`) — importance-detection pipeline
   (tokenizer, lexicon, n-grams, scoring). Pure computation, no I/O.
 - `scrub` — secret-scrubbing patterns and `scrub_secrets`. Pure, no I/O.
@@ -330,10 +391,12 @@ Entries carry a `scope` field (e.g. `"discord:thread:42"`,
 All features implemented and tested: single-crate layout, scoped data model,
 the `ContextForge` async public API facade, real BM25 scoring via standalone
 Tantivy, save-time secret scrubbing, optional rayon parallelism (`parallel`),
-and local-LLM distillation via an OpenAI-compatible endpoint (`distill-http`).
+local-LLM distillation via an OpenAI-compatible endpoint (`distill-http`), and
+hybrid BM25 + semantic search with RRF fusion (`semantic`).
 
 Live-validated against a Discord bot (Husk) across save/recall, BM25 ranking,
-restart persistence, scope isolation, and secret-scrubbing test scenarios.
+restart persistence, scope isolation, secret-scrubbing, and semantic vocabulary-gap
+retrieval (queries with zero BM25 term overlap returning the correct entry).
 
 Storage is turso (async SQLite) + standalone Tantivy. All public methods are
 `async` — a tokio runtime is required.
