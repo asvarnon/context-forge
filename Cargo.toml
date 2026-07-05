@@ -31,8 +31,10 @@ default = ["analysis"]
 analysis = ["dep:stop-words"]
 parallel = ["dep:rayon", "analysis"]
 distill-http = ["dep:reqwest"]
+semantic = ["dep:fastembed"]
 
 [dependencies]
+tracing = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -46,6 +48,7 @@ regex = "1"
 toml = "0.8"
 rayon = { version = "1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"], optional = true }
+fastembed = { version = "5", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

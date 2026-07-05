@@ -81,6 +81,13 @@ pub mod traits;
 /// [`LexiconProposal`].
 pub mod lexicon;
 
+/// Dense-vector embedding abstraction for semantic search.
+///
+/// The [`semantic::Embedder`] trait is always available. [`semantic::FasEmbedder`]
+/// (fastembed + ONNX Runtime, all-MiniLM-L6-v2) is compiled only with the
+/// `semantic` Cargo feature.
+pub mod semantic;
+
 /// Importance-detection pipeline (tokenizer, lexicon, scoring). Pure
 /// computation, no I/O. Enabled by the `analysis` feature (default).
 #[cfg(feature = "analysis")]
@@ -311,6 +318,32 @@ impl ContextForge {
     /// Returns an error if the underlying storage count fails.
     pub async fn count(&self) -> Result<usize> {
         self.engine.storage().count().await
+    }
+
+    /// Backfill embeddings for all entries that do not yet have one.
+    ///
+    /// Call this once after enabling semantic search on an existing database to
+    /// index historical entries. New entries are embedded automatically at save
+    /// time, so backfill is only needed for pre-existing data.
+    ///
+    /// `batch_size` controls how many entries are embedded per ONNX inference
+    /// call (recommended: 32). `progress` is called after each batch with
+    /// `(done, total)`. Returns the number of entries successfully embedded.
+    ///
+    /// Does nothing and returns `Ok(0)` if no embedder is configured or if all
+    /// entries already have embeddings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if fetching unembedded entries fails or if the
+    /// embedding task panics.
+    #[cfg(feature = "semantic")]
+    pub async fn backfill_embeddings(
+        &self,
+        batch_size: usize,
+        progress: impl Fn(usize, usize),
+    ) -> Result<usize> {
+        self.engine.backfill_embeddings(batch_size, progress).await
     }
 }
 

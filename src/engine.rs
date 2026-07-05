@@ -9,6 +9,9 @@ use crate::entry::ContextEntry;
 use crate::error::Error;
 use crate::lexicon::LexiconScorer;
 use crate::traits::{ContextStorage, Result, Searcher};
+// Bring the Embedder trait into scope for method dispatch on Arc<FasEmbedder>.
+#[cfg(feature = "semantic")]
+use crate::semantic::Embedder as _;
 
 /// Default candidate limit when fetching search results for assembly.
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -55,6 +58,8 @@ pub struct ContextEngine {
     searcher: Box<dyn Searcher>,
     config: Config,
     scorer: Option<Arc<dyn LexiconScorer>>,
+    #[cfg(feature = "semantic")]
+    embedder: Option<Arc<crate::semantic::FasEmbedder>>,
 }
 
 impl ContextEngine {
@@ -78,6 +83,8 @@ impl ContextEngine {
             searcher,
             config,
             scorer: None,
+            #[cfg(feature = "semantic")]
+            embedder: None,
         }
     }
 
@@ -91,6 +98,18 @@ impl ContextEngine {
     #[must_use]
     pub fn with_scorer(mut self, scorer: Arc<dyn LexiconScorer>) -> Self {
         self.scorer = Some(scorer);
+        self
+    }
+
+    /// Attach an [`crate::semantic::Embedder`] for semantic search.
+    ///
+    /// When set, [`Self::save_snapshot`] generates and stores an embedding for
+    /// each new entry, and [`Self::assemble`] blends BM25 and semantic
+    /// candidates via Reciprocal Rank Fusion (RRF, k=60).
+    #[cfg(feature = "semantic")]
+    #[must_use]
+    pub(crate) fn with_embedder(mut self, embedder: Arc<crate::semantic::FasEmbedder>) -> Self {
+        self.embedder = Some(embedder);
         self
     }
 
@@ -113,46 +132,83 @@ impl ContextEngine {
         scope: Option<&str>,
         token_budget: usize,
     ) -> Result<Vec<ContextEntry>> {
-        let candidates = self
-            .searcher
-            .search(query, scope, DEFAULT_SEARCH_LIMIT)
-            .await?;
-        if candidates.is_empty() {
+        let limit = DEFAULT_SEARCH_LIMIT;
+
+        tracing::debug!(query = %query, ?scope, token_budget, "assemble: bm25 search");
+        let bm25_candidates = self.searcher.search(query, scope, limit).await?;
+        tracing::debug!(count = %bm25_candidates.len(), "assemble: bm25 complete");
+
+        // Semantic search runs when the feature is enabled and an embedder is
+        // configured; otherwise returns empty (no-op default on the Searcher trait).
+        let semantic_candidates = self.run_semantic_search(query, scope, limit).await;
+        tracing::debug!(count = %semantic_candidates.len(), "assemble: semantic complete");
+
+        if bm25_candidates.is_empty() && semantic_candidates.is_empty() {
+            tracing::debug!("assemble: both searches empty");
             return Ok(Vec::new());
         }
 
-        let now = current_timestamp();
-
-        // Apply recency weighting using the configured half-life, then
-        // apply the lexicon importance boost (if a scorer is wired in).
+        // Reciprocal Rank Fusion (RRF, k=60) over the full union of both
+        // candidate sets. Entries absent from one list get worst_rank = limit+1.
         //
-        // Formula: final = base_score * (1.0 + boost.max(-1.0))
-        // A boost of 0.0 leaves ranking unchanged; +1.0 doubles the score;
-        // -1.0 zeroes it (floor prevents negative final scores).
+        // RRF score = 1/(k + bm25_rank) + 1/(k + semantic_rank)
+        // Then multiply by recency decay and (1 + lexicon_boost).
+        let worst_rank = limit + 1;
+        let k = 60.0_f64;
+        let now = current_timestamp();
         let half_life = self.config.recency_half_life_secs;
-        let mut weighted: Vec<(f64, ContextEntry)> = candidates
+
+        // Build entry map: semantic first so BM25 entries win on overlap.
+        let mut entry_map: std::collections::HashMap<String, ContextEntry> =
+            std::collections::HashMap::new();
+        for se in &semantic_candidates {
+            entry_map
+                .entry(se.entry.id.clone())
+                .or_insert_with(|| se.entry.clone());
+        }
+        for se in &bm25_candidates {
+            entry_map.insert(se.entry.id.clone(), se.entry.clone());
+        }
+
+        let bm25_rank: std::collections::HashMap<&str, usize> = bm25_candidates
+            .iter()
+            .enumerate()
+            .map(|(i, se)| (se.entry.id.as_str(), i + 1))
+            .collect();
+        let semantic_rank: std::collections::HashMap<&str, usize> = semantic_candidates
+            .iter()
+            .enumerate()
+            .map(|(i, se)| (se.entry.id.as_str(), i + 1))
+            .collect();
+
+        let mut weighted: Vec<(f64, ContextEntry)> = entry_map
             .into_iter()
-            .map(|se| {
-                // Unix timestamps are well within f64's 52-bit mantissa for
-                // any realistic date range, so precision loss is not a concern.
+            .map(|(id, entry)| {
+                let br = *bm25_rank.get(id.as_str()).unwrap_or(&worst_rank);
+                let sr = *semantic_rank.get(id.as_str()).unwrap_or(&worst_rank);
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "ranks are small integers (max ~51); lossless"
+                )]
+                let rrf = 1.0 / (k + br as f64) + 1.0 / (k + sr as f64);
+
                 #[allow(
                     clippy::cast_precision_loss,
                     reason = "Unix timestamps fit losslessly in f64 for millions of years"
                 )]
-                let age = (now - se.entry.timestamp).max(0) as f64;
+                let age = (now - entry.timestamp).max(0) as f64;
                 let decay = recency_decay(age, half_life);
-                let base_score = se.score * decay;
                 let boost = self
                     .scorer
                     .as_ref()
-                    .map_or(0.0_f32, |s| s.score(&se.entry, query));
-                let final_score = base_score * (1.0 + (f64::from(boost)).clamp(-1.0, 2.0));
-                (final_score, se.entry)
+                    .map_or(0.0_f32, |s| s.score(&entry, query));
+                let final_score = rrf * decay * (1.0 + f64::from(boost).clamp(-1.0, 2.0));
+                (final_score, entry)
             })
             .collect();
 
-        // Sort descending by weighted score (total_cmp handles NaN consistently).
         weighted.sort_by(|a, b| b.0.total_cmp(&a.0));
+        tracing::debug!(fused = %weighted.len(), "assemble: rrf fusion complete");
 
         // Greedy bin-packing by token budget — skip oversized entries, don't abort.
         let mut result = Vec::new();
@@ -168,7 +224,45 @@ impl ContextEngine {
             result.push(entry);
         }
 
+        tracing::debug!(entries = %result.len(), tokens_used, "assemble: complete");
         Ok(result)
+    }
+
+    /// Run semantic search if an embedder is available; otherwise return empty.
+    #[allow(
+        clippy::unused_async,
+        reason = "async only active under semantic feature"
+    )]
+    async fn run_semantic_search(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        limit: usize,
+    ) -> Vec<crate::entry::ScoredEntry> {
+        #[cfg(feature = "semantic")]
+        if let Some(ref embedder) = self.embedder {
+            let emb = embedder.clone();
+            let query_owned = query.to_owned();
+            match tokio::task::spawn_blocking(move || emb.embed(&query_owned)).await {
+                Ok(Ok(embedding)) => {
+                    tracing::debug!(dims = %embedding.len(), "query embedding ready");
+                    match self
+                        .searcher
+                        .search_semantic(&embedding, scope, limit)
+                        .await
+                    {
+                        Ok(results) => return results,
+                        Err(e) => tracing::warn!(error = %e, "semantic search failed"),
+                    }
+                }
+                Ok(Err(e)) => tracing::warn!(error = %e, "query embedding failed"),
+                Err(e) => tracing::warn!(error = %e, "embed task panicked"),
+            }
+        }
+        // Suppress unused-parameter lint when semantic feature is disabled.
+        #[cfg(not(feature = "semantic"))]
+        let _ = (query, scope, limit);
+        Vec::new()
     }
 
     /// Save a new snapshot entry. Capacity enforcement (LRU eviction) is
@@ -215,8 +309,55 @@ impl ContextEngine {
         };
 
         self.storage.save(&entry).await?;
+        tracing::trace!(id = %id, kind = %kind, tokens = %token_count, "entry saved");
+
+        // Non-fatal: if embedding fails, the entry is stored and BM25-searchable.
+        self.embed_and_store(&id, content).await;
 
         Ok(id)
+    }
+
+    /// Generate and persist an embedding for an already-saved entry.
+    ///
+    /// Errors are logged and swallowed — the entry is always stored even when
+    /// embedding fails.
+    #[allow(
+        clippy::unused_async,
+        reason = "async only active under semantic feature"
+    )]
+    async fn embed_and_store(&self, id: &str, content: &str) {
+        #[cfg(feature = "semantic")]
+        if let Some(ref embedder) = self.embedder {
+            tracing::debug!(id = %id, "generating embedding");
+            let emb = embedder.clone();
+            let text = content.to_owned();
+            let id_owned = id.to_owned();
+            match tokio::task::spawn_blocking(move || emb.embed(&text)).await {
+                Ok(Ok(embedding)) => {
+                    if let Err(e) = self.storage.save_embedding(&id_owned, &embedding).await {
+                        tracing::warn!(
+                            id = %id_owned,
+                            error = %e,
+                            "save_embedding failed; entry stored without semantic index"
+                        );
+                    } else {
+                        tracing::trace!(id = %id_owned, dims = %embedding.len(), "embedding stored");
+                    }
+                }
+                Ok(Err(e)) => tracing::warn!(
+                    id = %id,
+                    error = %e,
+                    "embed failed; entry stored without semantic index"
+                ),
+                Err(e) => tracing::warn!(
+                    id = %id,
+                    error = %e,
+                    "embed task panicked; entry stored without semantic index"
+                ),
+            }
+        }
+        #[cfg(not(feature = "semantic"))]
+        let _ = (id, content);
     }
 
     /// Return a reference to the underlying storage backend.
@@ -227,6 +368,68 @@ impl ContextEngine {
     #[must_use]
     pub fn storage(&self) -> &dyn ContextStorage {
         self.storage.as_ref()
+    }
+
+    /// Backfill embeddings for all entries that do not yet have one.
+    ///
+    /// Entries are fetched and embedded in batches of `batch_size` (capped to
+    /// at least 1). The `progress` callback is called after each batch with
+    /// `(done_so_far, total)`.
+    ///
+    /// Returns the number of entries that were successfully embedded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if fetching unembedded entries fails or if the
+    /// embedding task panics.
+    #[cfg(feature = "semantic")]
+    pub async fn backfill_embeddings(
+        &self,
+        batch_size: usize,
+        progress: impl Fn(usize, usize),
+    ) -> Result<usize> {
+        let embedder = if let Some(e) = &self.embedder {
+            e.clone()
+        } else {
+            tracing::debug!("backfill_embeddings: no embedder configured");
+            return Ok(0);
+        };
+
+        let all = self.storage.get_unembedded(usize::MAX).await?;
+        let total = all.len();
+        if total == 0 {
+            tracing::debug!("backfill_embeddings: all entries already embedded");
+            return Ok(0);
+        }
+
+        tracing::debug!(total = %total, batch_size = %batch_size, "backfill_embeddings: starting");
+        let batch = batch_size.max(1);
+        let mut n_embedded = 0usize;
+
+        for chunk in all.chunks(batch) {
+            let texts: Vec<String> = chunk.iter().map(|e| e.content.clone()).collect();
+            let emb = embedder.clone();
+            let embeddings = tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                emb.embed_batch(&refs)
+            })
+            .await
+            .map_err(|e| Error::Migration(format!("backfill embed task panicked: {e}")))?
+            .map_err(|e| Error::Migration(format!("backfill embed failed: {e}")))?;
+
+            for (entry, embedding) in chunk.iter().zip(embeddings.iter()) {
+                if let Err(e) = self.storage.save_embedding(&entry.id, embedding).await {
+                    tracing::warn!(id = %entry.id, error = %e, "backfill: save_embedding failed");
+                } else {
+                    n_embedded += 1;
+                }
+            }
+
+            progress(n_embedded, total);
+            tracing::debug!(done = %n_embedded, total = %total, "backfill_embeddings: batch done");
+        }
+
+        Ok(n_embedded)
     }
 }
 

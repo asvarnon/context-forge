@@ -3,8 +3,9 @@
 [![crates.io](https://img.shields.io/crates/v/context-forge.svg)](https://crates.io/crates/context-forge)
 
 A local-first persistent memory library for LLM applications. turso (async
-SQLite) + standalone Tantivy BM25 retrieval, recency-decay scoring, and
-token-budget-aware context assembly — no cloud dependency, fully async.
+SQLite) + standalone Tantivy BM25 retrieval + fastembed semantic search,
+recency-decay scoring, and token-budget-aware context assembly — no cloud
+dependency, fully async.
 
 Embed it in a bot, agent runtime, or MCP server that needs durable,
 searchable memory across sessions.
@@ -16,10 +17,11 @@ model, and not a wrapper around one. The query and assembly pipeline runs with n
 AI calls:
 
 ```
-query → BM25 candidate set   (Tantivy, classical information retrieval)
-      → recency decay score   (exponential formula, configurable half-life)
-      → lexicon importance    (config-driven heuristics, CPU-only)
-      → [future] semantic similarity  (embedding cosine, CPU-only)
+query → BM25 candidate set        (Tantivy, classical information retrieval)
+      + semantic candidate set     (fastembed all-MiniLM-L6-v2, cosine similarity)
+      → RRF score fusion           (Reciprocal Rank Fusion, k=60, full union)
+      → recency decay score        (exponential formula, configurable half-life)
+      → lexicon importance         (config-driven heuristics, CPU-only)
       → token budget cut
       → minimal high-signal context block
 ```
@@ -35,12 +37,14 @@ distillation produces structured memory retrieved cheaply on every future query.
 That asymmetry is intentional — many fast algorithmic retrievals per one
 deliberate LLM call.
 
-**Semantic search** (planned) will add embedding cosine similarity as a fourth
-ranking signal, catching entries that share meaning even when they share no words.
-It complements the pipeline; it does not replace the algorithmic layers. BM25,
-recency, and the lexicon handle explicit memory-intent signals (decisions,
-commitments, corrections, domain terms) that semantic similarity is not
-specifically designed to detect. The layers are additive.
+**Semantic search** (opt-in via the `semantic` feature) adds embedding cosine
+similarity as a ranking signal, catching entries that share meaning even when
+they share no words. Both BM25 and semantic candidates feed into Reciprocal Rank
+Fusion before recency and lexicon scoring — the full union of both result sets is
+considered, not just a re-ranking of BM25 results. BM25, recency, and the lexicon
+handle explicit memory-intent signals (decisions, commitments, corrections, domain
+terms) that semantic similarity is not specifically designed to detect. The layers
+are additive.
 
 ## Installation
 
@@ -102,11 +106,62 @@ durable storage.
 
 ## Feature flags
 
-| Feature | Default | Pulls in | Status |
+| Feature | Default | Pulls in | Notes |
 |---|---|---|---|
 | `analysis` | yes | `stop-words` | Importance-detection pipeline — tokenizer, lexicon, n-grams, recurrence, classification, scoring. |
-| `parallel` | no | `rayon` | Opt-in rayon parallelism for the `analysis` pipeline (per-session term maps, classification, scoring). The library never configures the global rayon pool. |
+| `parallel` | no | `rayon` | Opt-in rayon parallelism for the `analysis` pipeline. The library never configures the global rayon pool. |
 | `distill-http` | no | `reqwest` | OpenAI-compatible local-LLM distillation (Ollama/llama-server). |
+| `semantic` | no | `fastembed` | Hybrid BM25 + semantic search via fastembed (all-MiniLM-L6-v2, ONNX Runtime). Downloads ~22 MB model weights on first use. |
+
+## Semantic search
+
+Enable the `semantic` feature to add vector similarity as a ranking signal
+alongside BM25. Uses `all-MiniLM-L6-v2` (384-dim, ~22 MB ONNX weights) via
+fastembed. Model weights are downloaded automatically on first use to a
+configurable cache directory; subsequent startups load from cache.
+
+### Wiring it in
+
+Use `ContextForge::builder` and call `with_embedding_model`:
+
+```rust
+use context_forge::{Config, ContextForge};
+use std::path::PathBuf;
+
+let mut config = Config::default();
+config.db_path = PathBuf::from("memory.db");
+
+// Model weights are cached in the `models/` directory alongside the DB.
+let cf = ContextForge::builder(config)
+    .with_embedding_model("models/")
+    .build()
+    .await?;
+```
+
+New entries are embedded automatically at save time. `query()` runs both BM25
+and semantic search in parallel, fusing results via RRF — no API change needed.
+
+### Backfilling existing entries
+
+If you enable semantic search on a database that already has entries, call
+`backfill_embeddings` once at startup to index the pre-existing content:
+
+```rust
+let embedded = cf.backfill_embeddings(32, |done, total| {
+    eprintln!("backfill: {done}/{total}");
+}).await?;
+```
+
+`batch_size` controls how many entries are sent to the ONNX model per inference
+call. 32 is a good default. The callback receives `(done, total)` after each
+batch. Returns the number of entries successfully embedded.
+
+### Runtime note
+
+ONNX inference is CPU-bound and blocking. The library wraps all embedding calls
+in `tokio::task::spawn_blocking` — the async runtime is never blocked. The
+multi-thread tokio flavor is required when using `semantic` alongside
+`distill-http` (both features use blocking tasks internally).
 
 ## Lexicon scoring
 
@@ -182,22 +237,147 @@ The result is a `lexicon.toml` you can load with `ConfigLexiconScorer::from_file
 
 This generation happens once at setup time — no LLM call on the query path.
 
+**Model quality matters.** The bootstrap prompt requires genuine domain knowledge and
+calibrated reasoning about which terms signal memory-worthy content. A small local
+model may produce a sparse or poorly-weighted lexicon. If your wired model is weak,
+skip the automatic path entirely: copy the prompt template below, substitute your
+persona, paste it into Claude / ChatGPT / any capable model in a browser, and save
+the TOML response directly to your lexicon file.
+
+<details>
+<summary>Bootstrap prompt template (copy, substitute your persona, paste into any LLM)</summary>
+
+```
+You are generating a lexicon configuration for a memory importance scoring system.
+
+The AI assistant using this lexicon has the following persona:
+<persona>
+YOUR PERSONA DESCRIPTION HERE
+</persona>
+
+## What this lexicon does
+
+This lexicon teaches a deterministic scoring system which domain-specific terms and phrases
+signal "this conversation entry is worth remembering." Entries that score higher survive a
+token budget cut and are surfaced in future conversations.
+
+The scoring formula is:
+  final_score = base_score × (1.0 + boost.clamp(-1.0, 2.0))
+
+Where boost accumulates as follows:
+  - Each matched [terms] entry adds its weight directly to boost
+  - Each matched [affirmations] pattern adds +0.5 to boost
+  - Each matched [negations] pattern subtracts 0.3 from boost
+
+A boost of 0.0 leaves the score unchanged. A boost of 1.0 doubles it (2.0×).
+The engine caps total boost at 2.0, giving a 3.0× maximum multiplier.
+
+## Weight calibration
+
+| Range     | Use for                                                                          |
+|-----------|----------------------------------------------------------------------------------|
+| 0.1–0.4   | Mildly domain-specific. Appears in casual and important content alike.           |
+| 0.5–0.8   | Strongly domain-specific. More often in important entries than not.              |
+| 0.9–1.5   | Critical term or proper noun. Almost always marks high-value content.            |
+
+Weights must be in (0.0, 1.5]. Never assign a weight above 1.5; the library will
+reject any config that does.
+
+## Inclusion rules for [terms]
+
+1. Minimum 4 characters, unless the term is a well-known domain acronym.
+2. Prefer precise multi-word phrases over short, ambiguous single words.
+3. Memory-value test: include a term ONLY if its presence in an entry makes that entry
+   meaningfully more likely to be worth recalling later. Do not include terms merely
+   because they sound authentic or in-character for the persona.
+
+## What NOT to include
+
+The system already handles generic English signals ("confirmed", "agreed", "remember this",
+"never mind", "my mistake", "incorrect", and similar). Do not repeat them. Only
+domain-specific vocabulary and dialect belong in this lexicon.
+
+## [affirmations] — speech act rules
+
+Affirmation patterns must map to one of these speech acts in this persona's dialect:
+  - Agreement or confirmation
+  - Future commitment or obligation
+  - Success or resolution
+  - Flagging something as important or worth noting
+
+Aim for 6–12 patterns. Domain-specific dialect only — no generic English.
+
+## [negations] — speech act rules
+
+Negation patterns must map to one of these speech acts in this persona's dialect:
+  - Dismissal or disregard
+  - Disagreement or correction
+  - Failure or rejection
+
+Aim for 4–8 patterns. Domain-specific dialect only — no generic English.
+
+## Output instructions
+
+Think through the calibration internally before writing any output. Reason about which
+terms are genuinely high-signal vs. merely in-character, and what speech acts this
+persona's dialect uses to express agreement, commitment, dismissal, and failure.
+
+Then output ONLY a single fenced TOML block. No markdown, no prose before or after
+the block. Put short rationale as valid TOML inline comments.
+
+\`\`\`toml
+# Persona lexicon — generated for context-forge
+# Persona: YOUR PERSONA DESCRIPTION HERE
+
+[terms]
+"term" = 0.4   # rationale: why this term signals important content
+
+[affirmations]
+patterns = [
+    "phrase",   # speech act: confirmation
+]
+
+[negations]
+patterns = [
+    "phrase",   # speech act: dismissal
+]
+\`\`\`
+```
+
+</details>
+
 ### Growing the lexicon at runtime
 
-The lexicon is a living document. Use `LexiconAppender` to atomically append new
-terms discovered at runtime without corrupting the existing file:
+The lexicon is a living document. Use `LexiconAppender` to atomically append or
+remove entries without corrupting the existing file. All writes use a
+write-to-temp-then-rename pattern, so a crash mid-write leaves the original
+intact.
 
 ```rust
 use context_forge::{LexiconAppender, LexiconProposal};
+use std::path::PathBuf;
 
-let appender = LexiconAppender::new("lexicon.toml");
+let appender = LexiconAppender::new(PathBuf::from("lexicon.toml"));
+
+// Add or overwrite a term. Rationale is written as a TOML inline comment.
 appender.append(&LexiconProposal {
     term: "Battle-Sister".to_owned(),
     weight: 0.7,
     rationale: Some("confirmed important in 7 entries".to_owned()),
     source_ids: vec![],
 })?;
+
+// Add affirmation/negation patterns. Both deduplicate case-insensitively.
+appender.append_affirmation("it shall be done")?;
+appender.append_negation("cogitator returns null")?;
+
+// Remove entries. Terms are case-sensitive identifiers; patterns are not.
+appender.remove_term("Battle-Sister")?;
+appender.remove_affirmation("IT SHALL BE DONE")?;    // matches regardless of case
+appender.remove_negation("Cogitator Returns Null")?; // same
 ```
+
+All `remove_*` methods are no-ops if the entry is not present.
 
 **Platform-specific shorthands** (chat abbreviations like `smh`, `imo`, `mb`) are
 intentionally excluded from the English defaults — they are context-specific, not
@@ -306,16 +486,22 @@ anything found in it.
 
 ## Architecture
 
-- `engine` — `ContextEngine::assemble`: BM25 search via the `Searcher` trait,
-  then recency decay (`score * 0.5^(age_seconds / half_life)`, default
-  half-life 259,200s / 72h, configurable via `Config`), then sort by weighted
-  score descending, then greedy bin-pack into the token budget. Oversized
-  entries are skipped, not aborting. Also owns `save_snapshot`. No I/O.
+- `engine` — `ContextEngine::assemble`: runs BM25 and semantic search (when
+  enabled), fuses candidates via Reciprocal Rank Fusion (k=60, full union),
+  then applies recency decay (`0.5^(age_seconds / half_life)`, default
+  half-life 259,200s / 72h), then lexicon boost, then greedy bin-pack into the
+  token budget. Oversized entries are skipped, not aborting. Also owns
+  `save_snapshot`, which triggers embedding generation non-fatally after each
+  write. No I/O.
 - `storage` — turso (async SQLite) for persistence, standalone Tantivy for
   in-memory BM25 indexing. Dual-write on save: turso commits to disk, tantivy
   updates the in-memory index. On open, the tantivy index is rebuilt from
   turso (linear startup cost, negligible for small corpora). turso is the
-  source of truth; tantivy is a derived index.
+  source of truth; tantivy is a derived index. When `semantic` is enabled,
+  entries also carry a `vector32` embedding column queried via
+  `vector_distance_cos` — no separate vector store needed.
+- `semantic` (feature `semantic`) — `Embedder` trait and `FasEmbedder`
+  (fastembed + ONNX Runtime). Embedding calls run inside `spawn_blocking`.
 - `analysis` (feature `analysis`) — importance-detection pipeline
   (tokenizer, lexicon, n-grams, scoring). Pure computation, no I/O.
 - `scrub` — secret-scrubbing patterns and `scrub_secrets`. Pure, no I/O.
@@ -330,10 +516,12 @@ Entries carry a `scope` field (e.g. `"discord:thread:42"`,
 All features implemented and tested: single-crate layout, scoped data model,
 the `ContextForge` async public API facade, real BM25 scoring via standalone
 Tantivy, save-time secret scrubbing, optional rayon parallelism (`parallel`),
-and local-LLM distillation via an OpenAI-compatible endpoint (`distill-http`).
+local-LLM distillation via an OpenAI-compatible endpoint (`distill-http`), and
+hybrid BM25 + semantic search with RRF fusion (`semantic`).
 
 Live-validated against a Discord bot (Husk) across save/recall, BM25 ranking,
-restart persistence, scope isolation, and secret-scrubbing test scenarios.
+restart persistence, scope isolation, secret-scrubbing, and semantic vocabulary-gap
+retrieval (queries with zero BM25 term overlap returning the correct entry).
 
 Storage is turso (async SQLite) + standalone Tantivy. All public methods are
 `async` — a tokio runtime is required.

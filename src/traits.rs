@@ -67,6 +67,35 @@ pub trait ContextStorage: Send + Sync {
     ///
     /// Returns an error if the underlying storage read fails.
     async fn count(&self) -> Result<usize>;
+
+    /// Persist a dense embedding vector for an already-saved entry.
+    ///
+    /// The default no-op is used by storage backends that do not support
+    /// vector search. `TursoStorage` overrides this to write into the
+    /// `embedding` column via `vector32(?)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying write fails.
+    async fn save_embedding(&self, id: &str, embedding: &[f32]) -> Result<()> {
+        tracing::trace!(id = %id, dims = embedding.len(), "save_embedding: no-op");
+        let _ = (id, embedding);
+        Ok(())
+    }
+
+    /// Return entries that do not yet have an embedding stored.
+    ///
+    /// Used by the backfill path. The default falls back to `get_all()`;
+    /// `TursoStorage` overrides with an efficient `WHERE embedding IS NULL` query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage read fails.
+    async fn get_unembedded(&self, limit: usize) -> Result<Vec<ContextEntry>> {
+        tracing::trace!(limit = %limit, "get_unembedded: using get_all fallback");
+        let all = self.get_all().await?;
+        Ok(all.into_iter().take(limit).collect())
+    }
 }
 
 /// Trait for searching context entries by relevance.
@@ -75,6 +104,27 @@ pub trait ContextStorage: Send + Sync {
 /// concurrent access from multiple worker threads.
 #[async_trait]
 pub trait Searcher: Send + Sync {
+    /// Search entries by cosine similarity to `embedding`, returning at most
+    /// `limit` results ordered by descending similarity score.
+    ///
+    /// The default no-op returns an empty list and is used by searcher backends
+    /// that do not support vector search. `TursoSearcher` overrides with a
+    /// `vector_distance_cos` query against the `embedding` column.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying vector search fails.
+    async fn search_semantic(
+        &self,
+        embedding: &[f32],
+        scope: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ScoredEntry>> {
+        tracing::trace!(dims = embedding.len(), "search_semantic: no-op");
+        let _ = (embedding, scope, limit);
+        Ok(Vec::new())
+    }
+
     /// Search for entries matching `query`, optionally restricted to `scope`,
     /// returning at most `limit` results ordered by descending relevance score.
     ///
