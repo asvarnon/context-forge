@@ -89,6 +89,12 @@ pub(crate) async fn turso_migrate(conn: &turso::Connection) -> crate::Result<()>
         (),
     )
     .await?;
+    // Additive migration: add embedding column for vector search.
+    // ALTER TABLE ... ADD COLUMN doesn't support IF NOT EXISTS in SQLite;
+    // we intentionally discard the error if the column already exists.
+    let _ = conn
+        .execute("ALTER TABLE entries ADD COLUMN embedding BLOB", ())
+        .await;
     Ok(())
 }
 
@@ -366,5 +372,45 @@ impl ContextStorage for TursoStorage {
             },
             None => Ok(0),
         }
+    }
+
+    async fn save_embedding(&self, id: &str, embedding: &[f32]) -> crate::Result<()> {
+        let vec_str = format!(
+            "[{}]",
+            embedding
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let conn = self.db.connect()?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.execute(
+            "UPDATE entries SET embedding = vector32(?1) WHERE id = ?2",
+            (vec_str, id.to_owned()),
+        )
+        .await?;
+        tracing::trace!(id = %id, dims = embedding.len(), "embedding saved to turso");
+        Ok(())
+    }
+
+    async fn get_unembedded(&self, limit: usize) -> crate::Result<Vec<crate::entry::ContextEntry>> {
+        let conn = self.db.connect()?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+
+        let mut rows = conn
+            .query(
+                "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata \
+                 FROM entries WHERE embedding IS NULL LIMIT ?1",
+                (i64::try_from(limit).unwrap_or(i64::MAX),),
+            )
+            .await?;
+
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push(turso_row_to_entry(&row)?);
+        }
+        tracing::trace!(count = %result.len(), "get_unembedded: returning entries");
+        Ok(result)
     }
 }

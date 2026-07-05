@@ -32,6 +32,15 @@ impl TursoSearcher {
 
 #[async_trait]
 impl Searcher for TursoSearcher {
+    async fn search_semantic(
+        &self,
+        embedding: &[f32],
+        scope: Option<&str>,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::entry::ScoredEntry>> {
+        self.search_semantic_impl(embedding, scope, limit).await
+    }
+
     async fn search(
         &self,
         query: &str,
@@ -133,6 +142,59 @@ impl Searcher for TursoSearcher {
 }
 
 impl TursoSearcher {
+    async fn search_semantic_impl(
+        &self,
+        embedding: &[f32],
+        scope: Option<&str>,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::entry::ScoredEntry>> {
+        let vec_str = format!(
+            "[{}]",
+            embedding
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let scope_owned = scope.map(str::to_owned);
+        let conn = self.db.connect()?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+
+        let mut rows = conn
+            .query(
+                "SELECT id, content, timestamp, kind, scope, session_id, token_count, metadata, \
+                 vector_distance_cos(embedding, vector32(?1)) as dist \
+                 FROM entries \
+                 WHERE embedding IS NOT NULL AND (?2 IS NULL OR scope = ?2) \
+                 ORDER BY dist ASC \
+                 LIMIT ?3",
+                (
+                    vec_str,
+                    scope_owned,
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                ),
+            )
+            .await?;
+
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let entry = turso_row_to_entry(&row)?;
+            let dist = match row.get_value(8)? {
+                turso::Value::Real(f) => f,
+                turso::Value::Integer(i) => i as f64,
+                _ => 1.0,
+            };
+            let score = (1.0 - dist).max(0.0);
+            result.push(crate::entry::ScoredEntry { score, entry });
+        }
+
+        tracing::debug!(
+            count = %result.len(),
+            "turso semantic search complete"
+        );
+        Ok(result)
+    }
+
     async fn search_all(
         &self,
         scope: Option<&str>,

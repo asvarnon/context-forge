@@ -44,6 +44,8 @@ use crate::ContextForge;
 pub struct ContextForgeBuilder {
     config: Config,
     persona_scorer: Option<Arc<dyn LexiconScorer>>,
+    #[cfg(feature = "semantic")]
+    embedding_cache_dir: Option<std::path::PathBuf>,
 }
 
 impl ContextForgeBuilder {
@@ -55,6 +57,8 @@ impl ContextForgeBuilder {
         Self {
             config,
             persona_scorer: None,
+            #[cfg(feature = "semantic")]
+            embedding_cache_dir: None,
         }
     }
 
@@ -66,6 +70,20 @@ impl ContextForgeBuilder {
     #[must_use]
     pub fn with_persona_scorer(mut self, scorer: impl LexiconScorer + 'static) -> Self {
         self.persona_scorer = Some(Arc::new(scorer));
+        self
+    }
+
+    /// Enable semantic search using the all-MiniLM-L6-v2 model.
+    ///
+    /// `cache_dir` is where fastembed stores the downloaded ONNX weights
+    /// (~22 MB). The model is downloaded automatically on first use; subsequent
+    /// starts load from the local cache.
+    ///
+    /// Requires the `semantic` Cargo feature.
+    #[cfg(feature = "semantic")]
+    #[must_use]
+    pub fn with_embedding_model(mut self, cache_dir: impl AsRef<std::path::Path>) -> Self {
+        self.embedding_cache_dir = Some(cache_dir.as_ref().to_path_buf());
         self
     }
 
@@ -91,8 +109,15 @@ impl ContextForgeBuilder {
             None => english,
         };
 
-        let engine = ContextEngine::new(Box::new(storage), Box::new(searcher), self.config)
+        #[cfg_attr(not(feature = "semantic"), allow(unused_mut))]
+        let mut engine = ContextEngine::new(Box::new(storage), Box::new(searcher), self.config)
             .with_scorer(scorer);
+
+        #[cfg(feature = "semantic")]
+        if let Some(cache_dir) = self.embedding_cache_dir {
+            let embedder = crate::semantic::FasEmbedder::new(&cache_dir)?;
+            engine = engine.with_embedder(Arc::new(embedder));
+        }
 
         Ok(ContextForge::from_parts(engine, scrub_config))
     }
