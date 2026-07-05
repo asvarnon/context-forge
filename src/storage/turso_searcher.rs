@@ -152,7 +152,7 @@ impl TursoSearcher {
             "[{}]",
             embedding
                 .iter()
-                .map(|f| f.to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -181,11 +181,18 @@ impl TursoSearcher {
             let entry = turso_row_to_entry(&row)?;
             let dist = match row.get_value(8)? {
                 turso::Value::Real(f) => f,
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "integer distances are 0 or 1; lossless"
+                )]
                 turso::Value::Integer(i) => i as f64,
                 _ => 1.0,
             };
-            let score = (1.0 - dist).max(0.0);
-            result.push(crate::entry::ScoredEntry { score, entry });
+            let similarity = (1.0 - dist).max(0.0);
+            result.push(crate::entry::ScoredEntry {
+                entry,
+                score: similarity,
+            });
         }
 
         tracing::debug!(

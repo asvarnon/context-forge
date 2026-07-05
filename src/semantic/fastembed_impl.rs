@@ -57,7 +57,7 @@ impl super::Embedder for FasEmbedder {
             .lock()
             .map_err(|_| crate::Error::Migration("fastembed model mutex poisoned".into()))?;
         guard
-            .embed(texts.to_vec(), Some(32))
+            .embed(texts, Some(32))
             .map_err(|e| crate::Error::Migration(format!("embed_batch: {e}")))
     }
 }

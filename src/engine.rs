@@ -186,6 +186,10 @@ impl ContextEngine {
             .map(|(id, entry)| {
                 let br = *bm25_rank.get(id.as_str()).unwrap_or(&worst_rank);
                 let sr = *semantic_rank.get(id.as_str()).unwrap_or(&worst_rank);
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "ranks are small integers (max ~51); lossless"
+                )]
                 let rrf = 1.0 / (k + br as f64) + 1.0 / (k + sr as f64);
 
                 #[allow(
@@ -225,6 +229,7 @@ impl ContextEngine {
     }
 
     /// Run semantic search if an embedder is available; otherwise return empty.
+    #[allow(clippy::unused_async, reason = "async only active under semantic feature")]
     async fn run_semantic_search(
         &self,
         query: &str,
@@ -238,7 +243,11 @@ impl ContextEngine {
             match tokio::task::spawn_blocking(move || emb.embed(&query_owned)).await {
                 Ok(Ok(embedding)) => {
                     tracing::debug!(dims = %embedding.len(), "query embedding ready");
-                    match self.searcher.search_semantic(&embedding, scope, limit).await {
+                    match self
+                        .searcher
+                        .search_semantic(&embedding, scope, limit)
+                        .await
+                    {
                         Ok(results) => return results,
                         Err(e) => tracing::warn!(error = %e, "semantic search failed"),
                     }
@@ -309,6 +318,7 @@ impl ContextEngine {
     ///
     /// Errors are logged and swallowed — the entry is always stored even when
     /// embedding fails.
+    #[allow(clippy::unused_async, reason = "async only active under semantic feature")]
     async fn embed_and_store(&self, id: &str, content: &str) {
         #[cfg(feature = "semantic")]
         if let Some(ref embedder) = self.embedder {
@@ -372,12 +382,11 @@ impl ContextEngine {
         batch_size: usize,
         progress: impl Fn(usize, usize),
     ) -> Result<usize> {
-        let embedder = match &self.embedder {
-            Some(e) => e.clone(),
-            None => {
-                tracing::debug!("backfill_embeddings: no embedder configured");
-                return Ok(0);
-            }
+        let embedder = if let Some(e) = &self.embedder {
+            e.clone()
+        } else {
+            tracing::debug!("backfill_embeddings: no embedder configured");
+            return Ok(0);
         };
 
         let all = self.storage.get_unembedded(usize::MAX).await?;
@@ -389,7 +398,7 @@ impl ContextEngine {
 
         tracing::debug!(total = %total, batch_size = %batch_size, "backfill_embeddings: starting");
         let batch = batch_size.max(1);
-        let mut embedded = 0usize;
+        let mut n_embedded = 0usize;
 
         for chunk in all.chunks(batch) {
             let texts: Vec<String> = chunk.iter().map(|e| e.content.clone()).collect();
@@ -406,15 +415,15 @@ impl ContextEngine {
                 if let Err(e) = self.storage.save_embedding(&entry.id, embedding).await {
                     tracing::warn!(id = %entry.id, error = %e, "backfill: save_embedding failed");
                 } else {
-                    embedded += 1;
+                    n_embedded += 1;
                 }
             }
 
-            progress(embedded, total);
-            tracing::debug!(done = %embedded, total = %total, "backfill_embeddings: batch done");
+            progress(n_embedded, total);
+            tracing::debug!(done = %n_embedded, total = %total, "backfill_embeddings: batch done");
         }
 
-        Ok(embedded)
+        Ok(n_embedded)
     }
 }
 

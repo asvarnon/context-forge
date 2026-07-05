@@ -379,7 +379,7 @@ impl ContextStorage for TursoStorage {
             "[{}]",
             embedding
                 .iter()
-                .map(|f| f.to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(",")
         );

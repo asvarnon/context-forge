@@ -6,7 +6,6 @@ use crate::error::Error;
 /// Result type alias for crate operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-
 /// Trait for persisting and retrieving context entries.
 ///
 /// Implementations must be thread-safe (`Send + Sync`) to support

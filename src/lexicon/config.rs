@@ -183,7 +183,13 @@ impl LexiconScorer for ConfigLexiconScorer {
             }
         }
 
-        boost as f32
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "boost is bounded by clamp; truncation is intentional"
+        )]
+        {
+            boost as f32
+        }
     }
 }
 

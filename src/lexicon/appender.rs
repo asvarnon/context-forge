@@ -45,8 +45,7 @@ impl LexiconAppender {
         if self.path.exists() {
             let raw = std::fs::read_to_string(&self.path)
                 .map_err(|e| Error::Migration(format!("lexicon read error: {e}")))?;
-            toml::from_str(&raw)
-                .map_err(|e| Error::Migration(format!("lexicon parse error: {e}")))
+            toml::from_str(&raw).map_err(|e| Error::Migration(format!("lexicon parse error: {e}")))
         } else {
             Ok(LexiconConfig::default())
         }
