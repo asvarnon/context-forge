@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- **Hybrid BM25 + semantic search** (`semantic` feature): fastembed `all-MiniLM-L6-v2` (384-dim, ONNX Runtime) generates embeddings at save time and stores them in a turso `F32_BLOB(384)` column. `query()` runs BM25 and vector search concurrently and fuses results via Reciprocal Rank Fusion (k = 60), so queries with zero BM25 term overlap still surface the correct entry via cosine similarity. `backfill_embeddings` indexes pre-existing entries in configurable batch sizes.
+- **`ContextForge::builder`**: fluent builder for wiring the embedding model (`with_embedding_model`) and persona scorer (`with_persona_scorer`). The builder always pre-seeds `DefaultEnglishScorer`; the persona scorer stacks on top.
+- **`LexiconScorer` trait**: `DefaultEnglishScorer` (confirmations, decisions, commitments, dismissals, corrections), `ConfigLexiconScorer` (TOML-driven, f64 weights, 3-token negation window), `CompositeLexiconScorer` (additive composition).
+- **`bootstrap_prompt(persona)`**: generates a structured calibration prompt for any LLM to produce a `lexicon.toml` tailored to the given persona. The response is a fenced TOML block; callers extract it, parse it, and save it to disk. No LLM call on the query path.
+- **`LexiconAppender` growth API**: `append_affirmation(pattern)`, `append_negation(pattern)` (both case-insensitive dedup), `remove_term(term)` (case-sensitive), `remove_affirmation(pattern)`, `remove_negation(pattern)` (both case-insensitive). All writes use atomic temp-rename.
+
+### Breaking Changes
+
+- `LexiconProposal.rationale`: `String` → `Option<String>`. Pass `Some("...")` or `None`; existing callers that set a non-empty rationale need `Some(...)`.
+- `LexiconConfig.terms` and `LexiconProposal.weight`: `f32` → `f64`. TOML now serializes `1.4` instead of `1.3999999761581421`. Callers using the `terms` map directly must update type annotations.
+- `LexiconAppender::new` takes `PathBuf`, not `&str`.
+
 ### Bug Fixes
 
 - **LRU eviction ghost entries:** `TursoStorage::save()` now captures the evicted entry's ID before the `DELETE` and calls `fts.remove()` after the turso commit, keeping the tantivy index in sync. Previously, evicted entries left ghost documents in tantivy that wasted BM25 score slots and degraded corpus statistics until the next restart.

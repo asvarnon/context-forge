@@ -348,20 +348,36 @@ patterns = [
 
 ### Growing the lexicon at runtime
 
-The lexicon is a living document. Use `LexiconAppender` to atomically append new
-terms discovered at runtime without corrupting the existing file:
+The lexicon is a living document. Use `LexiconAppender` to atomically append or
+remove entries without corrupting the existing file. All writes use a
+write-to-temp-then-rename pattern, so a crash mid-write leaves the original
+intact.
 
 ```rust
 use context_forge::{LexiconAppender, LexiconProposal};
+use std::path::PathBuf;
 
-let appender = LexiconAppender::new("lexicon.toml");
+let appender = LexiconAppender::new(PathBuf::from("lexicon.toml"));
+
+// Add or overwrite a term. Rationale is written as a TOML inline comment.
 appender.append(&LexiconProposal {
     term: "Battle-Sister".to_owned(),
     weight: 0.7,
     rationale: Some("confirmed important in 7 entries".to_owned()),
     source_ids: vec![],
 })?;
+
+// Add affirmation/negation patterns. Both deduplicate case-insensitively.
+appender.append_affirmation("it shall be done")?;
+appender.append_negation("cogitator returns null")?;
+
+// Remove entries. Terms are case-sensitive identifiers; patterns are not.
+appender.remove_term("Battle-Sister")?;
+appender.remove_affirmation("IT SHALL BE DONE")?;    // matches regardless of case
+appender.remove_negation("Cogitator Returns Null")?; // same
 ```
+
+All `remove_*` methods are no-ops if the entry is not present.
 
 **Platform-specific shorthands** (chat abbreviations like `smh`, `imo`, `mb`) are
 intentionally excluded from the English defaults — they are context-specific, not
