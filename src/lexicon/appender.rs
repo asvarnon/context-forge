@@ -13,7 +13,7 @@ pub struct LexiconProposal {
     /// The term to add.
     pub term: String,
     /// Proposed importance weight (e.g. `1.3`).
-    pub weight: f32,
+    pub weight: f64,
     /// Human-readable rationale produced by the LLM reasoner. Written as a
     /// TOML inline comment on the term line when `Some`.
     pub rationale: Option<String>,

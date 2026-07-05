@@ -31,7 +31,7 @@ pub struct LexiconConfig {
     /// adds 30% to the base score (1.3×); `1.0` doubles it (2.0×). Weights must
     /// be in `(0.0, 1.5]` — the engine caps total boost at `2.0` (3.0× maximum).
     #[serde(default)]
-    pub terms: HashMap<String, f32>,
+    pub terms: HashMap<String, f64>,
 
     /// Phrases that signal affirmation/confirmation in this persona's dialect.
     /// Each match adds a fixed `+0.5` boost.
@@ -160,7 +160,7 @@ impl LexiconScorer for ConfigLexiconScorer {
     fn score(&self, entry: &ContextEntry, _query: &str) -> f32 {
         // Normalize: lowercase + strip apostrophes so "that's right" matches "thats right".
         let content = entry.content.to_lowercase().replace('\'', "");
-        let mut boost = 0.0_f32;
+        let mut boost = 0.0_f64;
 
         for (term, weight) in &self.config.terms {
             let term_norm = term.to_lowercase().replace('\'', "");
@@ -183,7 +183,7 @@ impl LexiconScorer for ConfigLexiconScorer {
             }
         }
 
-        boost
+        boost as f32
     }
 }
 
