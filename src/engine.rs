@@ -9,6 +9,9 @@ use crate::entry::ContextEntry;
 use crate::error::Error;
 use crate::lexicon::LexiconScorer;
 use crate::traits::{ContextStorage, Result, Searcher};
+// Bring the Embedder trait into scope for method dispatch on Arc<FasEmbedder>.
+#[cfg(feature = "semantic")]
+use crate::semantic::Embedder as _;
 
 /// Default candidate limit when fetching search results for assembly.
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -56,7 +59,7 @@ pub struct ContextEngine {
     config: Config,
     scorer: Option<Arc<dyn LexiconScorer>>,
     #[cfg(feature = "semantic")]
-    embedder: Option<Arc<dyn crate::semantic::Embedder>>,
+    embedder: Option<Arc<crate::semantic::FasEmbedder>>,
 }
 
 impl ContextEngine {
@@ -105,7 +108,7 @@ impl ContextEngine {
     /// candidates via Reciprocal Rank Fusion (RRF, k=60).
     #[cfg(feature = "semantic")]
     #[must_use]
-    pub fn with_embedder(mut self, embedder: Arc<dyn crate::semantic::Embedder>) -> Self {
+    pub(crate) fn with_embedder(mut self, embedder: Arc<crate::semantic::FasEmbedder>) -> Self {
         self.embedder = Some(embedder);
         self
     }

@@ -113,13 +113,9 @@ pub use lexicon::{
     LexiconAppender, LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
 };
 pub use scrub::{scrub_secrets, ScrubConfig};
-pub use semantic::Embedder;
 pub use session::{group_entries_by_session, SessionGroup};
 pub use storage::{open_storage, TursoSearcher, TursoStorage};
 pub use traits::{ContextStorage, Result, Searcher};
-
-#[cfg(feature = "semantic")]
-pub use semantic::FasEmbedder;
 
 /// The documented entry point for `context-forge`.
 ///
