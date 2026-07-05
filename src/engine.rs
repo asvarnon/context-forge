@@ -229,7 +229,10 @@ impl ContextEngine {
     }
 
     /// Run semantic search if an embedder is available; otherwise return empty.
-    #[allow(clippy::unused_async, reason = "async only active under semantic feature")]
+    #[allow(
+        clippy::unused_async,
+        reason = "async only active under semantic feature"
+    )]
     async fn run_semantic_search(
         &self,
         query: &str,
@@ -318,7 +321,10 @@ impl ContextEngine {
     ///
     /// Errors are logged and swallowed — the entry is always stored even when
     /// embedding fails.
-    #[allow(clippy::unused_async, reason = "async only active under semantic feature")]
+    #[allow(
+        clippy::unused_async,
+        reason = "async only active under semantic feature"
+    )]
     async fn embed_and_store(&self, id: &str, content: &str) {
         #[cfg(feature = "semantic")]
         if let Some(ref embedder) = self.embedder {
