@@ -74,7 +74,7 @@ impl Searcher for TursoSearcher {
         };
 
         let top_docs = searcher
-            .search(&tantivy_query, &TopDocs::with_limit(limit))
+            .search(&tantivy_query, &TopDocs::with_limit(limit).order_by_score())
             .map_err(|e| crate::Error::Migration(e.to_string()))?;
 
         if top_docs.is_empty() {
@@ -87,8 +87,10 @@ impl Searcher for TursoSearcher {
             let doc: TantivyDocument = searcher
                 .doc(doc_address)
                 .map_err(|e| crate::Error::Migration(e.to_string()))?;
-            if let Some(OwnedValue::Str(id_str)) = doc.get_first(self.fts.id_field) {
-                scored_ids.push((score, id_str.to_owned()));
+            if let Some(OwnedValue::Str(id_str)) =
+                doc.get_first(self.fts.id_field).map(OwnedValue::from)
+            {
+                scored_ids.push((score, id_str));
             }
         }
 
