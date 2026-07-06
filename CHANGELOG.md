@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- **`OpenAiCompatDistiller::with_api_key`**: bearer token support for authenticated cloud endpoints. Pass any OpenAI-compatible API key (OpenAI, Groq, Together AI, GLM/ZhipuAI, etc.) and it is sent as `Authorization: Bearer <key>` on every request. The distiller now uses `rustls` and supports `https://` base URLs; the previous `http://`-only restriction is lifted.
+
+## [0.8.1] - 2026-07-05
+
+### Bug Fixes
+
+- Bump `tantivy` `0.22` → `0.26`: clears RUSTSEC-2026-0002 (`lru` unsound) and RUSTSEC-2024-0384 (`instant` unmaintained), deduplicates tantivy versions in the dependency graph.
+- Update `anyhow` to `1.0.103` via `cargo update`: clears RUSTSEC-2026-0190 (unsound in `1.0.98`–`1.0.102`).
+- Fix `tantivy 0.26` API break in `TursoSearcher`: `TopDocs::with_limit(n)` now requires `.order_by_score()` to implement `Collector`; `get_first()` now returns `CompactDocValue<'_>` requiring `.map(OwnedValue::from)` before pattern matching.
+
+## [0.7.0] - 2026-07-05
+
+### Features
+
 - **Hybrid BM25 + semantic search** (`semantic` feature): fastembed `all-MiniLM-L6-v2` (384-dim, ONNX Runtime) generates embeddings at save time and stores them in a turso `F32_BLOB(384)` column. `query()` runs BM25 and vector search concurrently and fuses results via Reciprocal Rank Fusion (k = 60), so queries with zero BM25 term overlap still surface the correct entry via cosine similarity. `backfill_embeddings` indexes pre-existing entries in configurable batch sizes.
 - **`ContextForge::builder`**: fluent builder for wiring the embedding model (`with_embedding_model`) and persona scorer (`with_persona_scorer`). The builder always pre-seeds `DefaultEnglishScorer`; the persona scorer stacks on top.
 - **`LexiconScorer` trait**: `DefaultEnglishScorer` (confirmations, decisions, commitments, dismissals, corrections), `ConfigLexiconScorer` (TOML-driven, f64 weights, 3-token negation window), `CompositeLexiconScorer` (additive composition).
@@ -20,8 +34,8 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
-- **LRU eviction ghost entries:** `TursoStorage::save()` now captures the evicted entry's ID before the `DELETE` and calls `fts.remove()` after the turso commit, keeping the tantivy index in sync. Previously, evicted entries left ghost documents in tantivy that wasted BM25 score slots and degraded corpus statistics until the next restart.
-- **Scoped tantivy search starvation:** Tantivy now indexes `scope` as a `STRING` (raw/keyword) field. Scoped queries use a `BooleanQuery` combining the content query with an exact-match scope `TermQuery`, so `TopDocs` is already scope-filtered before returning. Previously, the global top-k could be entirely dominated by a different scope, crowding out valid results in the requested scope. The Rust-side scope filter and overfetch heuristic are removed.
+- **LRU eviction ghost entries:** `TursoStorage::save()` now captures the evicted entry's ID before the `DELETE` and calls `fts.remove()` after the turso commit, keeping the tantivy index in sync.
+- **Scoped tantivy search starvation:** Tantivy now indexes `scope` as a `STRING` (raw/keyword) field. Scoped queries use a `BooleanQuery` combining the content query with an exact-match scope `TermQuery`, so `TopDocs` is already scope-filtered before returning. The Rust-side scope filter and overfetch heuristic are removed.
 
 ## [0.6.0] - 2026-06-30
 
