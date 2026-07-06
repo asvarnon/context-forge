@@ -181,15 +181,14 @@ struct ChatResponseMessage {
 }
 
 /// A [`Distiller`] that talks to an OpenAI-compatible `/chat/completions`
-/// endpoint such as Ollama or llama-server.
+/// endpoint such as Ollama, llama-server, or any cloud API.
 ///
-/// # HTTP only
+/// # TLS and authentication
 ///
-/// This client is built without a TLS stack and supports `http://` base URLs
-/// only — it targets local or LAN/VPN inference endpoints (Ollama,
-/// llama-server). An `https://` base URL fails at request time with
-/// [`Error::Distill`]. If you need a remote TLS endpoint, implement
-/// [`Distiller`] with your own HTTP client.
+/// This client uses `rustls-tls` and supports both `http://` and `https://`
+/// base URLs. For authenticated endpoints (`OpenAI`, compatible cloud APIs),
+/// pass a bearer token via [`with_api_key`](Self::with_api_key) — it is sent
+/// as `Authorization: Bearer <key>` on every request.
 ///
 /// # Fallback behaviour
 ///
@@ -213,6 +212,7 @@ pub struct OpenAiCompatDistiller {
     schema_style: SchemaStyle,
     max_transcript_chars: usize,
     timeout: Duration,
+    api_key: Option<String>,
 }
 
 impl OpenAiCompatDistiller {
@@ -235,6 +235,7 @@ impl OpenAiCompatDistiller {
             schema_style: SchemaStyle::default(),
             max_transcript_chars: DEFAULT_MAX_TRANSCRIPT_CHARS,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            api_key: None,
         })
     }
 
@@ -257,6 +258,14 @@ impl OpenAiCompatDistiller {
     #[must_use]
     pub fn with_max_transcript_chars(mut self, max_transcript_chars: usize) -> Self {
         self.max_transcript_chars = max_transcript_chars;
+        self
+    }
+
+    /// Sets a bearer token sent as `Authorization: Bearer <key>` on every
+    /// request. Required for authenticated cloud endpoints such as `OpenAI`.
+    #[must_use]
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
         self
     }
 
@@ -289,7 +298,11 @@ impl OpenAiCompatDistiller {
         client: &reqwest::blocking::Client,
         body: &ChatRequest<'_>,
     ) -> std::result::Result<reqwest::blocking::Response, reqwest::Error> {
-        client.post(self.endpoint()).json(body).send()
+        let mut req = client.post(self.endpoint()).json(body);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        req.send()
     }
 
     /// Sends a chat completion request and returns the parsed response
@@ -509,10 +522,12 @@ mod tests {
         (format!("http://{addr}"), rx)
     }
 
-    /// Reads headers and the request body (using `Content-Length`) from a
-    /// raw HTTP/1.1 request.
+    /// Reads the full HTTP/1.1 request (request line + headers + body) from
+    /// the stream and returns it as a single string. Header lines are included
+    /// so tests can assert on header values (e.g. `Authorization`).
     fn read_request_body(stream: &mut std::net::TcpStream) -> String {
         let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut captured = String::new();
         let mut content_length: usize = 0;
 
         loop {
@@ -521,11 +536,13 @@ mod tests {
                 break;
             }
             let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                break;
-            }
             if let Some(value) = trimmed.to_ascii_lowercase().strip_prefix("content-length:") {
                 content_length = value.trim().parse().unwrap_or(0);
+            }
+            captured.push_str(trimmed);
+            captured.push('\n');
+            if trimmed.is_empty() {
+                break;
             }
         }
 
@@ -533,7 +550,8 @@ mod tests {
         if content_length > 0 {
             let _ = reader.read_exact(&mut body);
         }
-        String::from_utf8(body).unwrap_or_default()
+        captured.push_str(&String::from_utf8(body).unwrap_or_default());
+        captured
     }
 
     fn distiller_for(base_url: &str) -> OpenAiCompatDistiller {
@@ -994,6 +1012,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn with_api_key_sends_authorization_header() {
+        let body = json!({"summary": "x", "facts": []}).to_string();
+        let envelope = json!({"choices": [{"message": {"content": body}}]}).to_string();
+
+        let (url, rx) = spawn_mock_server(vec![MockResponse {
+            status_line: "HTTP/1.1 200 OK",
+            body: envelope,
+        }]);
+
+        let distiller = OpenAiCompatDistiller::new(&url, "test-model")
+            .expect("construct distiller")
+            .with_timeout_secs(5)
+            .with_api_key("my-secret-key");
+        distiller.distill("transcript").expect("distill ok");
+
+        let request = rx.recv().expect("captured request");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer my-secret-key"),
+            "expected Authorization header in request:\n{request}"
+        );
+    }
+
+    #[test]
+    fn without_api_key_no_authorization_header() {
+        let body = json!({"summary": "x", "facts": []}).to_string();
+        let envelope = json!({"choices": [{"message": {"content": body}}]}).to_string();
+
+        let (url, rx) = spawn_mock_server(vec![MockResponse {
+            status_line: "HTTP/1.1 200 OK",
+            body: envelope,
+        }]);
+
+        let distiller = distiller_for(&url);
+        distiller.distill("transcript").expect("distill ok");
+
+        let request = rx.recv().expect("captured request");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "expected no Authorization header in request:\n{request}"
+        );
+    }
+
     /// Wire-level proof companion to
     /// `request_body_is_openai_portable_struct_level`: runs a real `distill()`
     /// call against the mock server and checks the bytes that actually went
@@ -1020,9 +1083,11 @@ mod tests {
         let distiller = distiller_for(&url);
         distiller.distill("hello transcript").expect("distill ok");
 
-        let request_body = rx.recv().expect("captured request");
+        let request = rx.recv().expect("captured request");
+        // Strip request line + headers — body follows the blank line.
+        let body_start = request.find("\n\n").map_or(0, |i| i + 2);
         let parsed: Value =
-            serde_json::from_str(&request_body).expect("request body is valid JSON");
+            serde_json::from_str(&request[body_start..]).expect("request body is valid JSON");
         assert_openai_portable(&parsed, Some(SchemaStyle::OpenAi));
     }
 }
