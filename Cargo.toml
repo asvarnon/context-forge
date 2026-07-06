@@ -22,6 +22,9 @@ exclude = [
     "rust-toolchain.toml",
 ]
 
+[workspace]
+members = ["benchmarks/longmemeval"]
+
 [lib]
 name = "context_forge"
 path = "src/lib.rs"
