@@ -19,6 +19,7 @@ mod metrics;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use context_forge::{Config, ContextForge};
 
@@ -208,10 +209,16 @@ async fn main() -> anyhow::Result<()> {
     let mut overall = Agg::default();
     let mut by_type: BTreeMap<String, Agg> = BTreeMap::new();
     let mut errors = 0usize;
+    let mut total = Timing::default();
 
     for (i, inst) in instances.iter().enumerate() {
         match run_instance(&args, inst).await {
-            Ok(result) => accumulate(&mut overall, &mut by_type, inst, result),
+            Ok((result, timing)) => {
+                total.build += timing.build;
+                total.ingest += timing.ingest;
+                total.query += timing.query;
+                accumulate(&mut overall, &mut by_type, inst, result);
+            }
             Err(e) => {
                 errors += 1;
                 eprintln!("  [!] instance {i} ({}) failed: {e}", inst.question_id);
@@ -223,6 +230,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     print_report(&overall, &by_type, errors);
+    println!(
+        "\nphase totals: build={:.1}s  ingest={:.1}s  query={:.1}s",
+        total.build.as_secs_f64(),
+        total.ingest.as_secs_f64(),
+        total.query.as_secs_f64(),
+    );
     Ok(())
 }
 
@@ -233,11 +246,27 @@ struct InstanceResult {
     budget_sessions: BTreeMap<usize, HashSet<String>>,
 }
 
-async fn run_instance(args: &Args, inst: &Instance) -> anyhow::Result<InstanceResult> {
-    let forge = build_forge(args.pipeline, &args.embed_dir).await?;
-    let scope = inst.question_id.as_str();
-    args.ingest.run(&forge, inst, scope).await?;
+/// Wall-clock split of one instance across the three phases, so we can see
+/// where the run's time actually goes (setup vs. ingest vs. query).
+#[derive(Default, Clone, Copy)]
+struct Timing {
+    build: Duration,
+    ingest: Duration,
+    query: Duration,
+}
 
+async fn run_instance(args: &Args, inst: &Instance) -> anyhow::Result<(InstanceResult, Timing)> {
+    let scope = inst.question_id.as_str();
+
+    let t = Instant::now();
+    let forge = build_forge(args.pipeline, &args.embed_dir).await?;
+    let build = t.elapsed();
+
+    let t = Instant::now();
+    args.ingest.run(&forge, inst, scope).await?;
+    let ingest = t.elapsed();
+
+    let t = Instant::now();
     // Unbounded query → ranked session order for Recall@k / NDCG@k.
     let ranked = forge
         .query(&inst.question, Some(scope), UNBOUNDED_BUDGET)
@@ -251,11 +280,19 @@ async fn run_instance(args: &Args, inst: &Instance) -> anyhow::Result<InstanceRe
         let sessions: HashSet<String> = entries.into_iter().filter_map(|e| e.session_id).collect();
         budget_sessions.insert(budget, sessions);
     }
+    let query = t.elapsed();
 
-    Ok(InstanceResult {
-        ranked_sessions,
-        budget_sessions,
-    })
+    Ok((
+        InstanceResult {
+            ranked_sessions,
+            budget_sessions,
+        },
+        Timing {
+            build,
+            ingest,
+            query,
+        },
+    ))
 }
 
 fn accumulate(
