@@ -165,7 +165,12 @@ struct Agg {
 }
 
 impl Agg {
-    fn record(&mut self, ranked: &[String], budgets: &BTreeMap<usize, HashSet<String>>, gold: &HashSet<String>) {
+    fn record(
+        &mut self,
+        ranked: &[String],
+        budgets: &BTreeMap<usize, HashSet<String>>,
+        gold: &HashSet<String>,
+    ) {
         for &k in K_VALUES {
             self.recall_at
                 .entry(k)
@@ -307,7 +312,13 @@ async fn run_persona(
         let mut budgets = BTreeMap::new();
         for &b in BUDGETS {
             let entries = forge.query(&row.user_query, Some(scope), b).await?;
-            budgets.insert(b, entries.into_iter().map(|e| e.content).collect::<HashSet<_>>());
+            budgets.insert(
+                b,
+                entries
+                    .into_iter()
+                    .map(|e| e.content)
+                    .collect::<HashSet<_>>(),
+            );
         }
 
         overall.scored += 1;
@@ -342,7 +353,12 @@ fn print_agg(name: &str, agg: &Agg) {
         .collect();
     let budgets: Vec<String> = BUDGETS
         .iter()
-        .map(|b| format!("R@{b}tok={:.3}", agg.recall_budget.get(b).map_or(0.0, Mean::get)))
+        .map(|b| {
+            format!(
+                "R@{b}tok={:.3}",
+                agg.recall_budget.get(b).map_or(0.0, Mean::get)
+            )
+        })
         .collect();
     println!("  {}", recalls.join("  "));
     println!("  {}", budgets.join("  "));
