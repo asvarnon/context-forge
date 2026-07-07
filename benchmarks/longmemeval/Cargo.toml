@@ -1,0 +1,13 @@
+[package]
+name = "longmemeval-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 0 retrieval benchmark for context-forge against the LongMemEval dataset. Dev-only; never published."
+
+[dependencies]
+context-forge = { path = "../..", features = ["semantic", "distill-http"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

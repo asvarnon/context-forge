@@ -47,9 +47,9 @@ jobs:
 
       - name: Run CI checks
         run: |
-          cargo fmt --check
-          cargo clippy -- -D warnings
-          cargo test
+          cargo fmt -p context-forge --check
+          cargo clippy -p context-forge -- -D warnings
+          cargo test -p context-forge
 
       - name: Commit and tag
         run: |

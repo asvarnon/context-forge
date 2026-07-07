@@ -27,3 +27,6 @@ __pycache__/
 
 # Step 0 exploration spikes (not part of the library crate)
 spikes/
+
+# Benchmark datasets (large, fetched manually — see benchmarks/*/README.md)
+benchmarks/*/data/
