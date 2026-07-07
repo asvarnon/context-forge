@@ -84,11 +84,15 @@ impl TursoStorage {
 
 pub(crate) async fn turso_migrate(conn: &turso::Connection) -> crate::Result<()> {
     conn.execute_batch(TURSO_SCHEMA).await?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_turso_fts ON entries USING fts (content)",
-        (),
-    )
-    .await?;
+    // Drop the turso-native FTS index if a prior version created it. BM25 ranking
+    // is served entirely by the standalone tantivy index ([`FtsIndex`]); this
+    // turso index was never queried, cost an index write on every insert, and —
+    // most importantly — panicked in turso_core's FTS drop handler
+    // ("FTS Drop: transaction already committed, cannot flush") when an in-memory
+    // database was dropped with a pending doc. `IF EXISTS` makes this a no-op on
+    // fresh databases and a one-time cleanup on existing ones (e.g. persistent
+    // consumer DBs that were created before this change).
+    let _ = conn.execute("DROP INDEX IF EXISTS idx_turso_fts", ()).await;
     // Additive migration: add embedding column for vector search.
     // ALTER TABLE ... ADD COLUMN doesn't support IF NOT EXISTS in SQLite;
     // we intentionally discard the error if the column already exists.

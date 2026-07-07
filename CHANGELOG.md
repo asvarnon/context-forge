@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file.
 
 - **Lexicon scoring is now opt-in.** `ContextForge::builder(...)` no longer auto-seeds `DefaultEnglishScorer`; by default the engine ranks on relevance (BM25, plus semantic when an embedding model is set) with no lexicon layer. Enable the English importance scorer explicitly with `.with_default_english_scorer()`, and note that `.with_persona_scorer(...)` no longer implies the English layer — call both to compose them. Rationale: the always-on, query-independent importance boost was shown to degrade factual retrieval (LongMemEval Recall@1 dropped 0.71 → 0.17 with the scorer forced on). Callers that want the old behavior — persona/importance use cases, e.g. a chat assistant — add `.with_default_english_scorer()`.
 
+### Bug Fixes
+
+- **Removed the unused turso-native FTS index (`idx_turso_fts`).** BM25 ranking is served entirely by the standalone tantivy index; this turso index was never queried, added an index write on every insert, and panicked in `turso_core`'s FTS drop handler (`FTS Drop: transaction already committed, cannot flush`) whenever an in-memory database was dropped with a pending document. Migrations now `DROP INDEX IF EXISTS idx_turso_fts` — a no-op on fresh databases and a one-time cleanup on existing ones. Retrieval results are unchanged.
+
 ### Features
 
 - **Pluggable embedder — `ContextForgeBuilder::with_embedder`.** Inject any `Embedder` implementation as an `Arc<dyn Embedder>`, so one loaded model can be shared across many `ContextForge` instances (load once, clone the `Arc`) or an alternate/remote backend can be supplied. `with_embedding_model(dir)` remains as a convenience that builds a `FasEmbedder`. `Embedder` (and `FasEmbedder`, under the `semantic` feature) are now re-exported at the crate root. `ContextEngine::with_embedder` is now `pub` and takes `Arc<dyn Embedder>`.
