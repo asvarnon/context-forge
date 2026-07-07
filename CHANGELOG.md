@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Lexicon boost is now a configurable dial — `Config::lexicon_boost_clamp`.** The lexicon scorer enters ranking as a multiplier `1.0 + boost.clamp(-c, c)`; `c` was a hardcoded `2.0` (→ up to 3×), now a `Config` field defaulting to a conservative `0.05`. Rationale: fused RRF relevance scores are tightly compressed (rank-1-to-2 gap ~1–2%), so a wide bound let a query-independent importance signal overwhelm relevance — on LongMemEval, the old bound dropped single-session Recall@1 from 0.94 to 0.38 even with semantic search active; `0.05` recovers ~87% of the no-lexicon baseline. `0.0` disables lexicon influence; larger values trade relevance precision for importance weight. Note: this benchmark measures only lexicon's *cost* on factual retrieval, not its *benefit* on persona/importance workloads — the default is harm-minimizing pending a persona-style eval.
+
 ### Breaking Changes
 
 - **Lexicon scoring is now opt-in.** `ContextForge::builder(...)` no longer auto-seeds `DefaultEnglishScorer`; by default the engine ranks on relevance (BM25, plus semantic when an embedding model is set) with no lexicon layer. Enable the English importance scorer explicitly with `.with_default_english_scorer()`, and note that `.with_persona_scorer(...)` no longer implies the English layer — call both to compose them. Rationale: the always-on, query-independent importance boost was shown to degrade factual retrieval (LongMemEval Recall@1 dropped 0.71 → 0.17 with the scorer forced on). Callers that want the old behavior — persona/importance use cases, e.g. a chat assistant — add `.with_default_english_scorer()`.

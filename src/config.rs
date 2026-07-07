@@ -10,6 +10,17 @@ pub const DEFAULT_RECENCY_HALF_LIFE_HOURS: f64 = 72.0;
 /// Default recency half-life in seconds (72 hours).
 pub const DEFAULT_RECENCY_HALF_LIFE_SECS: f64 = DEFAULT_RECENCY_HALF_LIFE_HOURS * 3600.0;
 
+/// Default maximum absolute lexicon boost applied to the score multiplier.
+///
+/// Deliberately small. The lexicon enters scoring as a multiplier
+/// `1.0 + boost.clamp(-c, c)`, and fused RRF relevance scores are tightly
+/// compressed (the rank-1-to-rank-2 gap is ~1–2%), so a wide bound lets a
+/// query-*independent* importance signal overwhelm relevance and bury the
+/// evidence. On a pure-relevance benchmark (`LongMemEval`) `0.05` recovered ~87%
+/// of the no-lexicon baseline's Recall@1 while still expressing modest
+/// importance; a larger value trades more relevance for more importance weight.
+pub const DEFAULT_LEXICON_BOOST_CLAMP: f64 = 0.05;
+
 /// Runtime configuration for the context engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -31,6 +42,16 @@ pub struct Config {
     /// Controls how fast older entries lose relevance. A value of 259200 (72 hours)
     /// means an entry's score halves every 3 days.
     pub recency_half_life_secs: f64,
+    /// Maximum absolute lexicon boost, i.e. the relevance↔importance dial.
+    ///
+    /// The lexicon scorer's output enters ranking as a multiplier
+    /// `1.0 + boost.clamp(-c, c)` on the fused relevance score, where `c` is this
+    /// value. `0.0` disables lexicon influence entirely (pure relevance);
+    /// larger values give importance signals more weight at the cost of
+    /// relevance precision. See [`DEFAULT_LEXICON_BOOST_CLAMP`] for the rationale
+    /// behind the conservative default. Negative or non-finite values are
+    /// treated as the default.
+    pub lexicon_boost_clamp: f64,
     /// Secret-scrubbing configuration applied to entry content at save time.
     pub scrub: ScrubConfig,
 }
@@ -47,6 +68,7 @@ impl Default for Config {
             db_path: PathBuf::from(":memory:"),
             eviction_policy: EvictionPolicy::Lru,
             recency_half_life_secs: DEFAULT_RECENCY_HALF_LIFE_SECS,
+            lexicon_boost_clamp: DEFAULT_LEXICON_BOOST_CLAMP,
             scrub: ScrubConfig::default(),
         }
     }

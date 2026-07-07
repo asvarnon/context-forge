@@ -23,7 +23,7 @@ exclude = [
 ]
 
 [workspace]
-members = ["benchmarks/longmemeval"]
+members = ["benchmarks/longmemeval", "benchmarks/personamem"]
 
 [lib]
 name = "context_forge"

@@ -28,9 +28,14 @@ __pycache__/
 # Step 0 exploration spikes (not part of the library crate)
 spikes/
 
-# Benchmark datasets (large, fetched manually — see benchmarks/*/README.md)
-benchmarks/*/data/
+# Benchmark datasets (large, fetched manually — see benchmarks/*/README.md).
+# Covers data/ and transformed variants like data_wh40k/.
+benchmarks/*/data*/
 
 # Embedding model cache (downloaded ONNX weights + tokenizer, ~90 MB)
 /models/
 .fastembed_cache/
+
+
+.env
+.env.local

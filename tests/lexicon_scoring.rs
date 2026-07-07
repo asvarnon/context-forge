@@ -93,7 +93,12 @@ patterns = ["the emperor frowns upon this"]
 "#;
     let persona: ConfigLexiconScorer = persona_toml.parse().unwrap();
 
-    let cf = ContextForge::builder(in_memory_config())
+    // This test verifies boost *magnitudes* order correctly (persona 1.4 >
+    // english 0.5 > neutral), which needs a clamp wide enough to distinguish
+    // them — the conservative default (0.05) would flatten both to a tie.
+    let mut config = in_memory_config();
+    config.lexicon_boost_clamp = 2.0;
+    let cf = ContextForge::builder(config)
         .with_default_english_scorer()
         .with_persona_scorer(persona)
         .build()
