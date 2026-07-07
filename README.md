@@ -165,15 +165,32 @@ multi-thread tokio flavor is required when using `semantic` alongside
 
 ## Lexicon scoring
 
-The library ships an always-on `DefaultEnglishScorer` that recognizes common
-English importance signals — confirmations (`"confirmed"`, `"that's right"`),
-importance flags (`"remember this"`, `"key point"`, `"deadline"`), decisions
-(`"we decided"`, `"final decision"`), commissives (`"i'll fix it"`, `"we committed
-to"`), dismissals (`"never mind"`, `"nevermind"`, `"nvm"`), and self-corrections
-(`"my mistake"`, `"scratch that"`).
+**Lexicon scoring is opt-in.** By default the engine ranks on relevance only
+(BM25, plus semantic when an embedding model is set) — no lexicon layer. Lexicon
+scoring applies a *query-independent* importance boost, which is the right signal
+for surfacing what matters to a persona but is the wrong signal for pure relevance
+retrieval (see [When to enable it](#when-to-enable-it)). You opt in with one or both
+of two independent scorers:
 
-On top of that baseline, callers can inject a **persona lexicon** — a TOML file
-with domain-specific terms, affirmations, and negations for their use case:
+- **`with_default_english_scorer()`** — the built-in `DefaultEnglishScorer`, which
+  recognizes common English importance signals: confirmations (`"confirmed"`,
+  `"that's right"`), importance flags (`"remember this"`, `"key point"`,
+  `"deadline"`), decisions (`"we decided"`), commissives (`"i'll fix it"`),
+  dismissals (`"never mind"`, `"nvm"`), and self-corrections (`"my mistake"`).
+- **`with_persona_scorer(...)`** — a domain **persona lexicon**: a TOML file with
+  domain-specific terms, affirmations, and negations for your use case.
+
+The two are **independent** — calling one does not imply the other. Compose whichever
+you want:
+
+| Builder calls | Active scorer |
+|---|---|
+| _(neither)_ | none — relevance only (BM25 + semantic) |
+| `.with_default_english_scorer()` | English importance markers only |
+| `.with_persona_scorer(p)` | **your persona lexicon only** (no English) |
+| both | both, composed additively via `CompositeLexiconScorer` |
+
+A persona lexicon TOML looks like:
 
 ```toml
 # lexicon.toml
@@ -189,16 +206,37 @@ patterns = ["for the emperor", "it shall be done", "affirmative, brother"]
 patterns = ["the emperor frowns upon this", "negative, battle-brother"]
 ```
 
-**Weight semantics:** term weights are additive boosts. The engine formula is
-`final_score = base × (1.0 + boost.clamp(-1.0, 2.0))`, so a weight of `0.3` adds
-30% (1.3×); `1.0` doubles the score (2.0×). The engine caps total boost at `2.0`
-(3.0× maximum). Weights must be in `(0.0, 1.5]` — the library rejects configs that
-exceed this range. Each affirmation match adds a fixed `+0.5`; each negation match
-subtracts `0.3`.
+**Weight semantics.** Inside a scorer, term weights are additive boosts (each
+affirmation match adds `+0.5`; each negation subtracts `0.3`; term weights must be
+in `(0.0, 1.5]`). The combined `boost` is then applied by the engine as a bounded
+multiplier:
+
+```text
+final_score = base × (1.0 + boost.clamp(-c, c))
+```
+
+where `c` is `Config::lexicon_boost_clamp` — **the relevance ↔ importance dial**,
+defaulting to a conservative `0.05`. With the default, even a large raw boost is
+capped to a ±5% nudge, so the lexicon acts as a gentle tiebreaker rather than
+overriding relevance. `0.0` disables lexicon influence entirely; larger values (e.g.
+`0.15`–`0.5`) trade relevance precision for stronger importance weighting.
+
+### When to enable it
+
+Lexicon scoring boosts entries by importance markers **regardless of the query**. On
+pure-relevance retrieval benchmarks (see [`benchmarks/`](benchmarks/)), forcing it on
+*lowered* recall — importance-*sounding* distractors outranked the actual answer,
+because fused relevance scores are tightly compressed and a broad importance
+multiplier reorders the top results. That is why it is off by default and bounded by
+a conservative clamp.
+
+Enable it when you want ranking to reflect **importance / persona salience**, not just
+query relevance (e.g. a persona-driven assistant surfacing what a user cares about).
+Keep it off — or the clamp low — for factual recall / question-answering, where
+relevance is all that matters. When in doubt, start without it and add it as a
+measured change.
 
 ### Wiring it in via the builder
-
-Use `ContextForge::builder` to compose the English baseline with your persona lexicon:
 
 ```rust
 use context_forge::{Config, ConfigLexiconScorer, ContextForge};
@@ -207,14 +245,30 @@ let persona: ConfigLexiconScorer = std::fs::read_to_string("lexicon.toml")?
     .parse()?;
 
 let cf = ContextForge::builder(config)
-    .with_persona_scorer(persona)
+    .with_default_english_scorer()   // optional: English importance markers
+    .with_persona_scorer(persona)    // optional: your domain lexicon
     .build()
     .await?;
 ```
 
-Without `with_persona_scorer`, the builder still pre-seeds `DefaultEnglishScorer` —
-plain-English importance signals are always active. `ContextForge::open` (the
-lower-level path) wires no scorer at all.
+Omit either call to leave that layer out; omit both for relevance-only ranking.
+`ContextForge::open` (the lower-level path) wires no scorer at all.
+
+**Toggling at runtime is the caller's job.** context-forge never reads environment
+variables — whether to enable each scorer is your application's decision. A common
+pattern is to gate the builder calls behind your own config/env flags:
+
+```rust
+let mut builder = ContextForge::builder(config);
+if std::env::var("CF_ENGLISH_LEXICON").as_deref() == Ok("1") {
+    builder = builder.with_default_english_scorer();
+}
+if let Ok(path) = std::env::var("CF_PERSONA_LEXICON") {
+    let persona: ConfigLexiconScorer = std::fs::read_to_string(path)?.parse()?;
+    builder = builder.with_persona_scorer(persona);
+}
+let cf = builder.build().await?;
+```
 
 ### Bootstrapping a persona lexicon with an LLM
 
@@ -261,16 +315,16 @@ This lexicon teaches a deterministic scoring system which domain-specific terms 
 signal "this conversation entry is worth remembering." Entries that score higher survive a
 token budget cut and are surfaced in future conversations.
 
-The scoring formula is:
-  final_score = base_score × (1.0 + boost.clamp(-1.0, 2.0))
-
-Where boost accumulates as follows:
+Each entry accumulates a boost:
   - Each matched [terms] entry adds its weight directly to boost
   - Each matched [affirmations] pattern adds +0.5 to boost
   - Each matched [negations] pattern subtracts 0.3 from boost
 
-A boost of 0.0 leaves the score unchanged. A boost of 1.0 doubles it (2.0×).
-The engine caps total boost at 2.0, giving a 3.0× maximum multiplier.
+The engine applies boost as a bounded multiplier on the relevance score
+(final_score = base_score × (1.0 + boost.clamp(-c, c))), where c is a caller-configured
+strength that is small by default. What matters for this file is therefore the RELATIVE
+weight of terms — how important each term is compared to the others — not any absolute
+multiplier. Calibrate weights on the scale below.
 
 ## Weight calibration
 
@@ -510,6 +564,23 @@ Entries carry a `scope` field (e.g. `"discord:thread:42"`,
 `"project:homelab-rs"`) for namespace partitioning; `scope = None` is global.
 `ContextForge::query(query, scope, token_budget)` restricts the search to
 `scope` when given, or searches everything when `scope` is `None`.
+
+## Benchmarks
+
+Retrieval quality is measured, not asserted. [`benchmarks/`](benchmarks/) contains
+dev-only harnesses that score whether `query` surfaces the known-relevant evidence,
+fully deterministically (no reader/judge LLM):
+
+- **`longmemeval`** — retrieval recall (Recall@k, Recall@budget) on the
+  [LongMemEval](https://github.com/xiaowu0162/LongMemEval) long-conversation dataset.
+- **`personamem`** — preference-retrieval recall on
+  [PersonaMem](https://huggingface.co/datasets/bowen-upenn/PersonaMem-v2).
+
+They isolate each pipeline layer (BM25 · +semantic · +lexicon) against the same gold
+labels, and report tokens alongside recall — the token-efficiency axis this library is
+built around. These measurements are what motivated lexicon scoring being opt-in with a
+conservative default clamp (see [When to enable it](#when-to-enable-it)). Datasets are
+fetched separately; see each crate's README.
 
 ## Status
 
