@@ -283,10 +283,109 @@ impl ContextStorage for TursoStorage {
     }
 
     async fn save_batch(&self, entries: &[ContextEntry]) -> crate::Result<()> {
-        for entry in entries {
-            self.persist_one(entry).await?;
+        if entries.is_empty() {
+            return Ok(());
         }
-        // Single index commit for the whole batch — the point of this method.
+
+        let conn = self.db.connect()?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let max_entries = self.max_entries;
+        let mut evicted_ids: Vec<String> = Vec::new();
+
+        let result = async {
+            conn.execute("BEGIN IMMEDIATE", ()).await?;
+
+            // Prepare the INSERT once and reuse it for every row: all rows are the
+            // same statement, only the bound values differ, so this avoids the
+            // per-row SQL re-parse that `conn.execute(sql, ...)` incurs. INSERT OR
+            // REPLACE is idempotent, so no per-row existence check is needed.
+            let mut insert = conn
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO entries \
+                     (id, content, timestamp, kind, scope, session_id, token_count, metadata) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .await?;
+
+            for entry in entries {
+                let metadata_json = entry
+                    .metadata
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|e| {
+                        crate::Error::InvalidEntry(format!("metadata is not valid JSON: {e}"))
+                    })?;
+                insert
+                    .execute((
+                        entry.id.clone(),
+                        entry.content.clone(),
+                        entry.timestamp,
+                        entry.kind.clone(),
+                        entry.scope.clone(),
+                        entry.session_id.clone(),
+                        entry
+                            .token_count
+                            .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+                        metadata_json,
+                    ))
+                    .await?;
+            }
+
+            // Eviction is handled once for the whole batch: if the inserts pushed
+            // the store over capacity, drop the oldest overflow rows. The batch's
+            // own entries carry current timestamps, so they are never the ones
+            // evicted here.
+            let mut count_rows = conn.query("SELECT COUNT(*) FROM entries", ()).await?;
+            let count: i64 = match count_rows.next().await? {
+                Some(row) => match row.get_value(0)? {
+                    turso::Value::Integer(n) => n,
+                    _ => 0,
+                },
+                None => 0,
+            };
+            drop(count_rows);
+
+            let cap = i64::try_from(max_entries).unwrap_or(i64::MAX);
+            let overflow = count - cap;
+            if overflow > 0 {
+                let mut id_rows = conn
+                    .query(
+                        "SELECT id FROM entries ORDER BY timestamp ASC LIMIT ?1",
+                        (overflow,),
+                    )
+                    .await?;
+                while let Some(row) = id_rows.next().await? {
+                    if let turso::Value::Text(id) = row.get_value(0)? {
+                        evicted_ids.push(id);
+                    }
+                }
+                drop(id_rows);
+                for id in &evicted_ids {
+                    conn.execute("DELETE FROM entries WHERE id = ?1", (id.clone(),))
+                        .await?;
+                }
+            }
+
+            conn.execute("COMMIT", ()).await?;
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return result;
+        }
+
+        // Turso batch committed — sync tantivy: remove evicted docs, stage all
+        // new entries, and commit the index once for the whole batch.
+        for id in &evicted_ids {
+            self.fts.remove(id)?;
+        }
+        for entry in entries {
+            self.fts
+                .add(&entry.id, &entry.content, entry.scope.as_deref())?;
+        }
         self.fts.commit()?;
         Ok(())
     }

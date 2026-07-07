@@ -140,11 +140,12 @@ impl ContextForge {
 
     /// Create a builder for `ContextForge`.
     ///
-    /// The builder always pre-seeds [`DefaultEnglishScorer`] so plain-English
-    /// importance signals are active without any configuration. Use
-    /// [`ContextForgeBuilder::with_persona_scorer`] to stack a domain-specific
-    /// scorer on top. See also [`Self::open`] for the lower-level path that
-    /// wires no scorer.
+    /// Lexicon scoring is **opt-in**: by default the engine ranks on relevance
+    /// (BM25, plus semantic when an embedding model is set), with no lexicon
+    /// layer. Enable it with
+    /// [`ContextForgeBuilder::with_default_english_scorer`] and/or
+    /// [`ContextForgeBuilder::with_persona_scorer`]. [`Self::open`] is the
+    /// lower-level path that likewise wires no scorer.
     #[must_use]
     pub fn builder(config: Config) -> ContextForgeBuilder {
         ContextForgeBuilder::new(config)
@@ -257,7 +258,8 @@ impl ContextForge {
         // Build all entries up front, then persist them in one batch so the
         // search index commits once (not once per summary + fact). Content is
         // scrubbed here — the same scrubbing `save` applies — before storage.
-        let mut items: Vec<(String, String, SaveOptions)> = Vec::with_capacity(1 + memory.facts.len());
+        let mut items: Vec<(String, String, SaveOptions)> =
+            Vec::with_capacity(1 + memory.facts.len());
         items.push((
             scrub_secrets(&memory.summary, &self.scrub_config).into_owned(),
             kind::SUMMARY.to_owned(),

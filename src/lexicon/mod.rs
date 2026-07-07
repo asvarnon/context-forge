@@ -12,11 +12,13 @@
 //!
 //! ## Two-layer design
 //!
-//! The builder always pre-seeds a [`DefaultEnglishScorer`] that recognizes
-//! plain-English importance signals ("confirmed", "never mind", etc.). A
-//! persona scorer ([`ConfigLexiconScorer`] loaded from a TOML file) is
-//! optional and stacks on top via [`CompositeLexiconScorer`]. Both layers
-//! are additive — the engine applies the `-1.0` floor clamp after fusion.
+//! Lexicon scoring is opt-in on the builder. [`DefaultEnglishScorer`] recognizes
+//! plain-English importance signals ("confirmed", "never mind", etc.) and is
+//! enabled via `with_default_english_scorer`. A persona scorer
+//! ([`ConfigLexiconScorer`] loaded from a TOML file) is added via
+//! `with_persona_scorer`. When both are set they stack via
+//! [`CompositeLexiconScorer`] — additive, with the engine applying the `-1.0`
+//! floor clamp after fusion.
 
 pub use self::appender::{LexiconAppender, LexiconProposal};
 pub use self::bootstrap::bootstrap_prompt;
