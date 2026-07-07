@@ -55,24 +55,31 @@ impl Ingest {
         instance: &Instance,
         scope: &str,
     ) -> anyhow::Result<()> {
+        // Collect all of the instance's turns and save them in one batch, so the
+        // tantivy index commits once per instance instead of once per turn.
+        let mut items: Vec<(String, String, SaveOptions)> = Vec::new();
         for (session_id, turns) in instance.sessions() {
             for turn in turns {
                 // Some LongMemEval turns have empty content; CF rejects empty
-                // entries, so skip them rather than fail the whole instance.
+                // entries, so skip them rather than fail the batch.
                 if turn.content.trim().is_empty() {
                     continue;
                 }
-                let opts = SaveOptions {
-                    session_id: Some(session_id.clone()),
-                    scope: Some(scope.to_owned()),
-                    ..Default::default()
-                };
-                forge
-                    .save(&turn.content, TURN_KIND, &opts)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("save turn in session {session_id}: {e}"))?;
+                items.push((
+                    turn.content.clone(),
+                    TURN_KIND.to_owned(),
+                    SaveOptions {
+                        session_id: Some(session_id.clone()),
+                        scope: Some(scope.to_owned()),
+                        ..Default::default()
+                    },
+                ));
             }
         }
+        forge
+            .save_batch(&items)
+            .await
+            .map_err(|e| anyhow::anyhow!("save batch for scope {scope}: {e}"))?;
         Ok(())
     }
 

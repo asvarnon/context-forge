@@ -176,9 +176,11 @@ fn get_int_opt(row: &turso::Row, idx: usize, field: &str) -> crate::Result<Optio
     }
 }
 
-#[async_trait]
-impl ContextStorage for TursoStorage {
-    async fn save(&self, entry: &ContextEntry) -> crate::Result<()> {
+impl TursoStorage {
+    /// Persist one entry to turso and stage it in the tantivy index **without**
+    /// committing the index. Callers commit afterward — [`save`](ContextStorage::save)
+    /// once per entry, [`save_batch`](ContextStorage::save_batch) once per batch.
+    async fn persist_one(&self, entry: &ContextEntry) -> crate::Result<()> {
         let conn = self.db.connect()?;
         conn.busy_timeout(Duration::from_secs(5))?;
         let max_entries = self.max_entries;
@@ -259,16 +261,34 @@ impl ContextStorage for TursoStorage {
             return result;
         }
 
-        // Turso write committed — update tantivy. If this fails the entry is
-        // still persisted in turso; next startup rebuild will re-sync the index.
+        // Turso write committed — stage in tantivy (no commit; the caller
+        // commits). If this fails the entry is still persisted in turso; the
+        // next startup rebuild will re-sync the index.
         if let Some(id) = evicted_id {
             self.fts.remove(&id)?;
         }
         self.fts
             .add(&entry.id, &entry.content, entry.scope.as_deref())?;
-        self.fts.commit()?;
 
-        result
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ContextStorage for TursoStorage {
+    async fn save(&self, entry: &ContextEntry) -> crate::Result<()> {
+        self.persist_one(entry).await?;
+        self.fts.commit()?;
+        Ok(())
+    }
+
+    async fn save_batch(&self, entries: &[ContextEntry]) -> crate::Result<()> {
+        for entry in entries {
+            self.persist_one(entry).await?;
+        }
+        // Single index commit for the whole batch — the point of this method.
+        self.fts.commit()?;
+        Ok(())
     }
 
     async fn get_top_k(&self, k: usize) -> crate::Result<Vec<ContextEntry>> {

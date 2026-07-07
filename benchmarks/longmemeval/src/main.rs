@@ -8,10 +8,10 @@
 //! Usage:
 //!   cargo run -p longmemeval-bench --release -- <dataset.json> [flags]
 //! Flags:
-//!   --pipeline bm25|lexicon|full   (default bm25)
-//!   --ingest   raw|distill         (default raw)
-//!   --limit    N                   (only the first N instances)
-//!   --embed-dir PATH               (model cache dir for full; or CF_EMBED_MODEL_DIR)
+//!   --pipeline bm25|lexicon|semantic|full   (default bm25)
+//!   --ingest   raw|distill                  (default raw)
+//!   --limit    N                            (only the first N instances)
+//!   --embed-dir PATH                        (model cache dir for semantic/full; or CF_EMBED_MODEL_DIR)
 
 mod dataset;
 mod ingest;
@@ -37,9 +37,13 @@ const UNBOUNDED_BUDGET: usize = 100_000_000;
 enum Pipeline {
     /// `open`: BM25 + recency, no lexicon, no embedder.
     Bm25,
-    /// `builder().build()`: BM25 + `DefaultEnglishScorer` (builder always seeds it).
+    /// `builder().with_default_english_scorer().build()`: BM25 + lexicon.
     Lexicon,
-    /// `builder().with_embedding_model().build()`: BM25 + semantic + lexicon.
+    /// `builder().with_embedding_model().build()`: BM25 + semantic, no lexicon.
+    /// (Expressible now that the English scorer is opt-in.)
+    Semantic,
+    /// `builder().with_default_english_scorer().with_embedding_model().build()`:
+    /// BM25 + semantic + lexicon.
     Full,
 }
 
@@ -48,6 +52,7 @@ impl Pipeline {
         match s {
             "bm25" => Ok(Pipeline::Bm25),
             "lexicon" => Ok(Pipeline::Lexicon),
+            "semantic" => Ok(Pipeline::Semantic),
             "full" => Ok(Pipeline::Full),
             other => Err(anyhow::anyhow!("unknown pipeline {other:?}")),
         }
@@ -56,6 +61,7 @@ impl Pipeline {
         match self {
             Pipeline::Bm25 => "bm25",
             Pipeline::Lexicon => "lexicon",
+            Pipeline::Semantic => "semantic",
             Pipeline::Full => "full",
         }
     }
@@ -122,15 +128,29 @@ async fn build_forge(
     let mut config = Config::default();
     config.db_path = PathBuf::from(":memory:");
     config.max_entries = 100_000_000; // never evict during a run
+    let require_dir = |embed_dir: &Option<PathBuf>| {
+        embed_dir.clone().ok_or_else(|| {
+            anyhow::anyhow!("--embed-dir (or CF_EMBED_MODEL_DIR) required for this pipeline")
+        })
+    };
     let forge = match pipeline {
         Pipeline::Bm25 => ContextForge::open(config).await?,
-        Pipeline::Lexicon => ContextForge::builder(config).build().await?,
-        Pipeline::Full => {
-            let dir = embed_dir.clone().ok_or_else(|| {
-                anyhow::anyhow!("--embed-dir (or CF_EMBED_MODEL_DIR) required for --pipeline full")
-            })?;
+        Pipeline::Lexicon => {
             ContextForge::builder(config)
-                .with_embedding_model(dir)
+                .with_default_english_scorer()
+                .build()
+                .await?
+        }
+        Pipeline::Semantic => {
+            ContextForge::builder(config)
+                .with_embedding_model(require_dir(embed_dir)?)
+                .build()
+                .await?
+        }
+        Pipeline::Full => {
+            ContextForge::builder(config)
+                .with_default_english_scorer()
+                .with_embedding_model(require_dir(embed_dir)?)
                 .build()
                 .await?
         }
