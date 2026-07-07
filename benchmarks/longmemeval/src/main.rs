@@ -8,10 +8,10 @@
 //! Usage:
 //!   cargo run -p longmemeval-bench --release -- <dataset.json> [flags]
 //! Flags:
-//!   --pipeline bm25|lexicon|full   (default bm25)
-//!   --ingest   raw|distill         (default raw)
-//!   --limit    N                   (only the first N instances)
-//!   --embed-dir PATH               (model cache dir for full; or CF_EMBED_MODEL_DIR)
+//!   --pipeline bm25|lexicon|semantic|full   (default bm25)
+//!   --ingest   raw|distill                  (default raw)
+//!   --limit    N                            (only the first N instances)
+//!   --embed-dir PATH                        (model cache dir for semantic/full; or CF_EMBED_MODEL_DIR)
 
 mod dataset;
 mod ingest;
@@ -19,8 +19,10 @@ mod metrics;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use context_forge::{Config, ContextForge};
+use context_forge::{Config, ContextForge, Embedder, FasEmbedder};
 
 use dataset::Instance;
 use ingest::Ingest;
@@ -37,9 +39,13 @@ const UNBOUNDED_BUDGET: usize = 100_000_000;
 enum Pipeline {
     /// `open`: BM25 + recency, no lexicon, no embedder.
     Bm25,
-    /// `builder().build()`: BM25 + `DefaultEnglishScorer` (builder always seeds it).
+    /// `builder().with_default_english_scorer().build()`: BM25 + lexicon.
     Lexicon,
-    /// `builder().with_embedding_model().build()`: BM25 + semantic + lexicon.
+    /// `builder().with_embedding_model().build()`: BM25 + semantic, no lexicon.
+    /// (Expressible now that the English scorer is opt-in.)
+    Semantic,
+    /// `builder().with_default_english_scorer().with_embedding_model().build()`:
+    /// BM25 + semantic + lexicon.
     Full,
 }
 
@@ -48,6 +54,7 @@ impl Pipeline {
         match s {
             "bm25" => Ok(Pipeline::Bm25),
             "lexicon" => Ok(Pipeline::Lexicon),
+            "semantic" => Ok(Pipeline::Semantic),
             "full" => Ok(Pipeline::Full),
             other => Err(anyhow::anyhow!("unknown pipeline {other:?}")),
         }
@@ -56,6 +63,7 @@ impl Pipeline {
         match self {
             Pipeline::Bm25 => "bm25",
             Pipeline::Lexicon => "lexicon",
+            Pipeline::Semantic => "semantic",
             Pipeline::Full => "full",
         }
     }
@@ -114,23 +122,41 @@ fn next(it: &mut impl Iterator<Item = String>, flag: &str) -> anyhow::Result<Str
 
 /// Build a fresh, empty engine for one instance (fresh in-memory DB → per-
 /// instance BM25 statistics and complete isolation).
+///
+/// `shared_embedder` is loaded once by `main` and injected into every instance
+/// via `with_embedder`, so the ONNX model loads a single time for the whole run
+/// (not once per instance).
 async fn build_forge(
     pipeline: Pipeline,
-    embed_dir: &Option<PathBuf>,
+    shared_embedder: &Option<Arc<dyn Embedder>>,
 ) -> anyhow::Result<ContextForge> {
     // Config is #[non_exhaustive] — build from Default, then set fields.
     let mut config = Config::default();
     config.db_path = PathBuf::from(":memory:");
     config.max_entries = 100_000_000; // never evict during a run
+    let require_embedder = || {
+        shared_embedder
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("this pipeline requires an embedder (--embed-dir)"))
+    };
     let forge = match pipeline {
         Pipeline::Bm25 => ContextForge::open(config).await?,
-        Pipeline::Lexicon => ContextForge::builder(config).build().await?,
-        Pipeline::Full => {
-            let dir = embed_dir.clone().ok_or_else(|| {
-                anyhow::anyhow!("--embed-dir (or CF_EMBED_MODEL_DIR) required for --pipeline full")
-            })?;
+        Pipeline::Lexicon => {
             ContextForge::builder(config)
-                .with_embedding_model(dir)
+                .with_default_english_scorer()
+                .build()
+                .await?
+        }
+        Pipeline::Semantic => {
+            ContextForge::builder(config)
+                .with_embedder(require_embedder()?)
+                .build()
+                .await?
+        }
+        Pipeline::Full => {
+            ContextForge::builder(config)
+                .with_default_english_scorer()
+                .with_embedder(require_embedder()?)
                 .build()
                 .await?
         }
@@ -185,13 +211,33 @@ async fn main() -> anyhow::Result<()> {
         args.ingest.label(),
     );
 
+    // Load the embedding model ONCE for the whole run (not per instance) and
+    // inject it into every ContextForge via with_embedder. Requires 1c's public
+    // Embedder injection; before it, each instance reloaded the model.
+    let shared_embedder: Option<Arc<dyn Embedder>> = match args.pipeline {
+        Pipeline::Semantic | Pipeline::Full => {
+            let dir = args.embed_dir.clone().ok_or_else(|| {
+                anyhow::anyhow!("--embed-dir (or CF_EMBED_MODEL_DIR) required for this pipeline")
+            })?;
+            eprintln!("  loading embedding model once from {}...", dir.display());
+            Some(Arc::new(FasEmbedder::new(&dir)?))
+        }
+        Pipeline::Bm25 | Pipeline::Lexicon => None,
+    };
+
     let mut overall = Agg::default();
     let mut by_type: BTreeMap<String, Agg> = BTreeMap::new();
     let mut errors = 0usize;
+    let mut total = Timing::default();
 
     for (i, inst) in instances.iter().enumerate() {
-        match run_instance(&args, inst).await {
-            Ok(result) => accumulate(&mut overall, &mut by_type, inst, result),
+        match run_instance(&args, inst, &shared_embedder).await {
+            Ok((result, timing)) => {
+                total.build += timing.build;
+                total.ingest += timing.ingest;
+                total.query += timing.query;
+                accumulate(&mut overall, &mut by_type, inst, result);
+            }
             Err(e) => {
                 errors += 1;
                 eprintln!("  [!] instance {i} ({}) failed: {e}", inst.question_id);
@@ -203,6 +249,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     print_report(&overall, &by_type, errors);
+    println!(
+        "\nphase totals: build={:.1}s  ingest={:.1}s  query={:.1}s",
+        total.build.as_secs_f64(),
+        total.ingest.as_secs_f64(),
+        total.query.as_secs_f64(),
+    );
     Ok(())
 }
 
@@ -213,11 +265,31 @@ struct InstanceResult {
     budget_sessions: BTreeMap<usize, HashSet<String>>,
 }
 
-async fn run_instance(args: &Args, inst: &Instance) -> anyhow::Result<InstanceResult> {
-    let forge = build_forge(args.pipeline, &args.embed_dir).await?;
-    let scope = inst.question_id.as_str();
-    args.ingest.run(&forge, inst, scope).await?;
+/// Wall-clock split of one instance across the three phases, so we can see
+/// where the run's time actually goes (setup vs. ingest vs. query).
+#[derive(Default, Clone, Copy)]
+struct Timing {
+    build: Duration,
+    ingest: Duration,
+    query: Duration,
+}
 
+async fn run_instance(
+    args: &Args,
+    inst: &Instance,
+    shared_embedder: &Option<Arc<dyn Embedder>>,
+) -> anyhow::Result<(InstanceResult, Timing)> {
+    let scope = inst.question_id.as_str();
+
+    let t = Instant::now();
+    let forge = build_forge(args.pipeline, shared_embedder).await?;
+    let build = t.elapsed();
+
+    let t = Instant::now();
+    args.ingest.run(&forge, inst, scope).await?;
+    let ingest = t.elapsed();
+
+    let t = Instant::now();
     // Unbounded query → ranked session order for Recall@k / NDCG@k.
     let ranked = forge
         .query(&inst.question, Some(scope), UNBOUNDED_BUDGET)
@@ -231,11 +303,19 @@ async fn run_instance(args: &Args, inst: &Instance) -> anyhow::Result<InstanceRe
         let sessions: HashSet<String> = entries.into_iter().filter_map(|e| e.session_id).collect();
         budget_sessions.insert(budget, sessions);
     }
+    let query = t.elapsed();
 
-    Ok(InstanceResult {
-        ranked_sessions,
-        budget_sessions,
-    })
+    Ok((
+        InstanceResult {
+            ranked_sessions,
+            budget_sessions,
+        },
+        Timing {
+            build,
+            ingest,
+            query,
+        },
+    ))
 }
 
 fn accumulate(

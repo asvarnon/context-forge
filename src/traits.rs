@@ -26,6 +26,25 @@ pub trait ContextStorage: Send + Sync {
     /// Returns an error if the underlying storage write fails.
     async fn save(&self, entry: &ContextEntry) -> Result<()>;
 
+    /// Persist multiple entries, committing any derived search index **once**
+    /// for the whole batch.
+    ///
+    /// Semantically equivalent to calling [`save`](Self::save) for each entry,
+    /// but implementations with a separate index (e.g. a tantivy BM25 index)
+    /// should override this to avoid a per-entry index commit. The default
+    /// implementation simply loops [`save`](Self::save).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any underlying storage write fails. On error, entries
+    /// already written before the failure may remain persisted.
+    async fn save_batch(&self, entries: &[ContextEntry]) -> Result<()> {
+        for entry in entries {
+            self.save(entry).await?;
+        }
+        Ok(())
+    }
+
     /// Return the top-k entries (most recent or highest priority).
     ///
     /// # Errors

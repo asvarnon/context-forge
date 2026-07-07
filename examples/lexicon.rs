@@ -57,14 +57,16 @@ patterns = [
 
     // ── 3. Wire into ContextForge via the builder ─────────────────────────────
     //
-    // The builder always pre-seeds DefaultEnglishScorer. with_persona_scorer
-    // stacks the WH40k lexicon on top via CompositeLexiconScorer.
+    // Lexicon scoring is opt-in. `with_default_english_scorer` enables the
+    // built-in English importance markers; `with_persona_scorer` stacks the
+    // WH40k lexicon on top via CompositeLexiconScorer.
 
     let mut config = context_forge::Config::default();
     // :memory: so the example leaves no files behind.
     config.db_path = std::path::PathBuf::from(":memory:");
 
     let cf = ContextForge::builder(config)
+        .with_default_english_scorer()
         .with_persona_scorer(persona)
         .build()
         .await?;

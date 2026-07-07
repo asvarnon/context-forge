@@ -113,6 +113,9 @@ pub use lexicon::{
     LexiconAppender, LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
 };
 pub use scrub::{scrub_secrets, ScrubConfig};
+pub use semantic::Embedder;
+#[cfg(feature = "semantic")]
+pub use semantic::FasEmbedder;
 pub use session::{group_entries_by_session, SessionGroup};
 pub use storage::{open_storage, TursoSearcher, TursoStorage};
 pub use traits::{ContextStorage, Result, Searcher};
@@ -140,11 +143,12 @@ impl ContextForge {
 
     /// Create a builder for `ContextForge`.
     ///
-    /// The builder always pre-seeds [`DefaultEnglishScorer`] so plain-English
-    /// importance signals are active without any configuration. Use
-    /// [`ContextForgeBuilder::with_persona_scorer`] to stack a domain-specific
-    /// scorer on top. See also [`Self::open`] for the lower-level path that
-    /// wires no scorer.
+    /// Lexicon scoring is **opt-in**: by default the engine ranks on relevance
+    /// (BM25, plus semantic when an embedding model is set), with no lexicon
+    /// layer. Enable it with
+    /// [`ContextForgeBuilder::with_default_english_scorer`] and/or
+    /// [`ContextForgeBuilder::with_persona_scorer`]. [`Self::open`] is the
+    /// lower-level path that likewise wires no scorer.
     #[must_use]
     pub fn builder(config: Config) -> ContextForgeBuilder {
         ContextForgeBuilder::new(config)
@@ -189,6 +193,32 @@ impl ContextForge {
         self.engine.save_snapshot(&scrubbed, kind, opts).await
     }
 
+    /// Save many entries in one batch, committing the search index **once** for
+    /// the whole batch instead of once per entry — much cheaper for bulk ingest.
+    ///
+    /// Each item is `(content, kind, options)`, handled exactly as
+    /// [`save`](Self::save) (content is scrubbed per item). Returns the generated
+    /// ids in the same order as `items`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any item's `content` is empty or if the underlying
+    /// storage write fails. On failure, entries written before the failure may
+    /// remain persisted.
+    pub async fn save_batch(&self, items: &[(String, String, SaveOptions)]) -> Result<Vec<String>> {
+        let scrubbed: Vec<(String, String, SaveOptions)> = items
+            .iter()
+            .map(|(content, kind, opts)| {
+                (
+                    scrub_secrets(content, &self.scrub_config).into_owned(),
+                    kind.clone(),
+                    opts.clone(),
+                )
+            })
+            .collect();
+        self.engine.save_snapshot_batch(&scrubbed).await
+    }
+
     /// Distill `transcript` into a summary and durable facts, then save
     /// them as separate entries sharing `opts.scope` and
     /// `opts.session_id`.
@@ -228,10 +258,16 @@ impl ContextForge {
         let memory = tokio::task::block_in_place(|| distiller.distill(&scrubbed_transcript))?;
         let memory = crate::distill::cap_distilled_memory(memory);
 
-        let mut ids = Vec::with_capacity(1 + memory.facts.len());
-
-        let summary_id = self.save(&memory.summary, kind::SUMMARY, opts).await?;
-        ids.push(summary_id);
+        // Build all entries up front, then persist them in one batch so the
+        // search index commits once (not once per summary + fact). Content is
+        // scrubbed here — the same scrubbing `save` applies — before storage.
+        let mut items: Vec<(String, String, SaveOptions)> =
+            Vec::with_capacity(1 + memory.facts.len());
+        items.push((
+            scrub_secrets(&memory.summary, &self.scrub_config).into_owned(),
+            kind::SUMMARY.to_owned(),
+            opts.clone(),
+        ));
 
         for fact in &memory.facts {
             let fact_kind_str = match fact.kind {
@@ -249,10 +285,14 @@ impl ContextForge {
                 scope: opts.scope.clone(),
                 metadata: Some(metadata),
             };
-            let fact_id = self.save(&fact.text, kind::FACT, &fact_opts).await?;
-            ids.push(fact_id);
+            items.push((
+                scrub_secrets(&fact.text, &self.scrub_config).into_owned(),
+                kind::FACT.to_owned(),
+                fact_opts,
+            ));
         }
 
+        let ids = self.engine.save_snapshot_batch(&items).await?;
         Ok(ids)
     }
 

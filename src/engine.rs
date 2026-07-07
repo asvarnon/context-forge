@@ -8,10 +8,9 @@ use crate::config::{Config, DEFAULT_RECENCY_HALF_LIFE_SECS};
 use crate::entry::ContextEntry;
 use crate::error::Error;
 use crate::lexicon::LexiconScorer;
-use crate::traits::{ContextStorage, Result, Searcher};
-// Bring the Embedder trait into scope for method dispatch on Arc<FasEmbedder>.
 #[cfg(feature = "semantic")]
-use crate::semantic::Embedder as _;
+use crate::semantic::Embedder;
+use crate::traits::{ContextStorage, Result, Searcher};
 
 /// Default candidate limit when fetching search results for assembly.
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -59,7 +58,7 @@ pub struct ContextEngine {
     config: Config,
     scorer: Option<Arc<dyn LexiconScorer>>,
     #[cfg(feature = "semantic")]
-    embedder: Option<Arc<crate::semantic::FasEmbedder>>,
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl ContextEngine {
@@ -105,10 +104,12 @@ impl ContextEngine {
     ///
     /// When set, [`Self::save_snapshot`] generates and stores an embedding for
     /// each new entry, and [`Self::assemble`] blends BM25 and semantic
-    /// candidates via Reciprocal Rank Fusion (RRF, k=60).
+    /// candidates via Reciprocal Rank Fusion (RRF, k=60). Accepts any
+    /// [`Embedder`](crate::semantic::Embedder) implementation, so callers can
+    /// inject a shared instance (load the model once) or an alternate backend.
     #[cfg(feature = "semantic")]
     #[must_use]
-    pub(crate) fn with_embedder(mut self, embedder: Arc<crate::semantic::FasEmbedder>) -> Self {
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
         self
     }
@@ -315,6 +316,47 @@ impl ContextEngine {
         self.embed_and_store(&id, content).await;
 
         Ok(id)
+    }
+
+    /// Save multiple snapshot entries with a **single** search-index commit for
+    /// the whole batch (see [`crate::traits::ContextStorage::save_batch`]),
+    /// instead of one commit per entry. Embeddings are still generated per entry
+    /// (non-fatal). Returns the generated ids in the same order as `items`.
+    ///
+    /// Each item is `(content, kind, options)`. Content must already be scrubbed
+    /// by the caller, as with [`Self::save_snapshot`].
+    pub(crate) async fn save_snapshot_batch(
+        &self,
+        items: &[(String, String, SaveOptions)],
+    ) -> Result<Vec<String>> {
+        if items.iter().any(|(content, _, _)| content.is_empty()) {
+            return Err(Error::InvalidEntry("content must not be empty".into()));
+        }
+
+        let entries: Vec<ContextEntry> = items
+            .iter()
+            .map(|(content, kind, options)| ContextEntry {
+                id: Uuid::now_v7().to_string(),
+                content: content.clone(),
+                timestamp: current_timestamp(),
+                kind: kind.clone(),
+                scope: options.scope.clone(),
+                session_id: options.session_id.clone(),
+                token_count: Some(estimate_tokens(content)),
+                metadata: options.metadata.clone(),
+            })
+            .collect();
+
+        self.storage.save_batch(&entries).await?;
+        tracing::trace!(count = %entries.len(), "entry batch saved");
+
+        // Embeddings are independent of the batched index commit (a separate
+        // turso UPDATE per entry); generate them after the batch is saved.
+        for entry in &entries {
+            self.embed_and_store(&entry.id, &entry.content).await;
+        }
+
+        Ok(entries.into_iter().map(|e| e.id).collect())
     }
 
     /// Generate and persist an embedding for an already-saved entry.

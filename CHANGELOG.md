@@ -4,8 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **Lexicon scoring is now opt-in.** `ContextForge::builder(...)` no longer auto-seeds `DefaultEnglishScorer`; by default the engine ranks on relevance (BM25, plus semantic when an embedding model is set) with no lexicon layer. Enable the English importance scorer explicitly with `.with_default_english_scorer()`, and note that `.with_persona_scorer(...)` no longer implies the English layer — call both to compose them. Rationale: the always-on, query-independent importance boost was shown to degrade factual retrieval (LongMemEval Recall@1 dropped 0.71 → 0.17 with the scorer forced on). Callers that want the old behavior — persona/importance use cases, e.g. a chat assistant — add `.with_default_english_scorer()`.
+
 ### Features
 
+- **Pluggable embedder — `ContextForgeBuilder::with_embedder`.** Inject any `Embedder` implementation as an `Arc<dyn Embedder>`, so one loaded model can be shared across many `ContextForge` instances (load once, clone the `Arc`) or an alternate/remote backend can be supplied. `with_embedding_model(dir)` remains as a convenience that builds a `FasEmbedder`. `Embedder` (and `FasEmbedder`, under the `semantic` feature) are now re-exported at the crate root. `ContextEngine::with_embedder` is now `pub` and takes `Arc<dyn Embedder>`.
+- **Batched writes — `ContextForge::save_batch`.** Persist many entries with a single search-index commit and a single prepared-statement transaction, instead of per-entry commits and per-entry SQL re-parses. `distill_and_save` now uses this path internally. Measured ~45% faster bulk ingest on the LongMemEval benchmark; no change to retrieval results.
 - **`OpenAiCompatDistiller::with_api_key`**: bearer token support for authenticated cloud endpoints. Pass any OpenAI-compatible API key (OpenAI, Groq, Together AI, GLM/ZhipuAI, etc.) and it is sent as `Authorization: Bearer <key>` on every request. The distiller now uses `rustls` and supports `https://` base URLs; the previous `http://`-only restriction is lifted.
 
 ## [0.8.1] - 2026-07-05

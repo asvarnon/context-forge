@@ -20,8 +20,9 @@ fn in_memory_config() -> context_forge::Config {
 // ── builder wiring ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn builder_without_persona_scorer_still_applies_english_defaults() {
+async fn opting_into_english_scorer_boosts_affirmation() {
     let cf = ContextForge::builder(in_memory_config())
+        .with_default_english_scorer()
         .build()
         .await
         .unwrap();
@@ -40,9 +41,42 @@ async fn builder_without_persona_scorer_still_applies_english_defaults() {
     assert_eq!(hits.len(), 2);
     assert_eq!(
         hits[0].id, affirm_id,
-        "English affirmation entry should rank first even without a persona scorer"
+        "opted-in English affirmation entry should rank first"
     );
     let _ = neutral_id;
+}
+
+#[tokio::test]
+async fn default_build_does_not_apply_english_defaults() {
+    // Regression guard for the opt-in change: a persona scorer WITHOUT
+    // `with_default_english_scorer` must not pull in English scoring. The persona
+    // boost (0.3) is deliberately smaller than the English "confirmed" boost
+    // (0.5) — if English were still auto-on, the English entry would win, so the
+    // persona entry winning proves English defaults are off.
+    let persona: ConfigLexiconScorer = "[terms]\n\"beacon\" = 0.3".parse().unwrap();
+    let cf = ContextForge::builder(in_memory_config())
+        .with_persona_scorer(persona)
+        .build()
+        .await
+        .unwrap();
+
+    let opts = SaveOptions::default();
+    let english_id = cf
+        .save("confirmed, that is correct", kind::SNAPSHOT, &opts)
+        .await
+        .unwrap();
+    let persona_id = cf
+        .save("light the beacon", kind::SNAPSHOT, &opts)
+        .await
+        .unwrap();
+
+    let hits = cf.query(MATCH_ALL_QUERY, None, 10_000).await.unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(
+        hits[0].id, persona_id,
+        "persona (0.3) must outrank the English marker (0.5-if-on), proving English defaults are off by default"
+    );
+    let _ = english_id;
 }
 
 #[tokio::test]
@@ -60,6 +94,7 @@ patterns = ["the emperor frowns upon this"]
     let persona: ConfigLexiconScorer = persona_toml.parse().unwrap();
 
     let cf = ContextForge::builder(in_memory_config())
+        .with_default_english_scorer()
         .with_persona_scorer(persona)
         .build()
         .await
@@ -103,6 +138,7 @@ patterns = ["the emperor frowns upon this"]
 #[tokio::test]
 async fn english_scorer_boosts_commissive_over_neutral() {
     let cf = ContextForge::builder(in_memory_config())
+        .with_default_english_scorer()
         .build()
         .await
         .unwrap();
@@ -130,6 +166,7 @@ async fn english_scorer_boosts_commissive_over_neutral() {
 async fn negation_window_suppresses_false_affirmation() {
     // "not confirmed" should not fire the "confirmed" affirmation.
     let cf = ContextForge::builder(in_memory_config())
+        .with_default_english_scorer()
         .build()
         .await
         .unwrap();

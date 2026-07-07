@@ -215,6 +215,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_save_batch_evicts_oldest_over_capacity() {
+        // A single batch that overflows capacity must evict the oldest rows once,
+        // keeping the newest `max_entries` — the batched-eviction path.
+        let (storage, _) = open_storage(Path::new(":memory:"), 3).await.unwrap();
+        let batch = vec![
+            make_entry("e1", "oldest", 100, kind::MANUAL),
+            make_entry("e2", "second", 200, kind::MANUAL),
+            make_entry("e3", "third", 300, kind::MANUAL),
+            make_entry("e4", "fourth", 400, kind::MANUAL),
+            make_entry("e5", "newest", 500, kind::MANUAL),
+        ];
+        storage.save_batch(&batch).await.unwrap();
+
+        assert_eq!(storage.count().await.unwrap(), 3);
+        let all = storage.get_all().await.unwrap();
+        let ids: Vec<&str> = all.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"e1"), "oldest should be evicted");
+        assert!(!ids.contains(&"e2"), "second-oldest should be evicted");
+        assert!(ids.contains(&"e3"));
+        assert!(ids.contains(&"e4"));
+        assert!(ids.contains(&"e5"));
+    }
+
+    #[tokio::test]
+    async fn test_save_batch_persists_and_indexes() {
+        // save_batch must persist every entry and commit the FTS index so the
+        // batch is immediately searchable — equivalent to a sequence of save().
+        let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
+        let batch = vec![
+            make_entry("b1", "rust programming language", 100, kind::MANUAL),
+            make_entry("b2", "python scripting tools", 200, kind::MANUAL),
+        ];
+        storage.save_batch(&batch).await.unwrap();
+
+        assert_eq!(storage.count().await.unwrap(), 2);
+        let hits = searcher.search("rust", None, 10).await.unwrap();
+        assert!(
+            hits.iter().any(|e| e.entry.id == "b1"),
+            "batch-saved entry should be FTS-searchable"
+        );
+    }
+
+    #[tokio::test]
     async fn test_fts_search() {
         let (storage, searcher) = open_storage(Path::new(":memory:"), 100).await.unwrap();
         storage
