@@ -278,11 +278,23 @@ async fn run_persona(
     forge.save_batch(&items).await?;
     let ingest = t.elapsed();
 
+    // Set of contents actually ingested for this persona, so rows whose gold
+    // evidence isn't in *this* history version (e.g. 128k-only evidence in a
+    // 32k run) can be skipped rather than scored as impossible zeros. Matches
+    // the transform script's filtering so English and WH40k runs use the same
+    // honest row set.
+    let ingested: HashSet<&str> = items.iter().map(|(c, _, _)| c.as_str()).collect();
+
     // Run each row's query against this persona's store.
     let t = Instant::now();
     for row in &persona.rows {
         let gold: HashSet<String> = row.gold_contents().into_iter().collect();
         if gold.is_empty() {
+            overall.skipped += 1;
+            continue;
+        }
+        // Skip rows whose evidence was never ingested (unanswerable here).
+        if !gold.iter().any(|g| ingested.contains(g.as_str())) {
             overall.skipped += 1;
             continue;
         }
