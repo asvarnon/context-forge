@@ -30,3 +30,7 @@ spikes/
 
 # Benchmark datasets (large, fetched manually — see benchmarks/*/README.md)
 benchmarks/*/data/
+
+# Embedding model cache (downloaded ONNX weights + tokenizer, ~90 MB)
+/models/
+.fastembed_cache/

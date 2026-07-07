@@ -7,6 +7,8 @@ use crate::config::Config;
 use crate::engine::ContextEngine;
 use crate::lexicon::{CompositeLexiconScorer, DefaultEnglishScorer, LexiconScorer};
 use crate::scrub::ScrubConfig;
+#[cfg(feature = "semantic")]
+use crate::semantic::{Embedder, FasEmbedder};
 use crate::storage::open_storage;
 use crate::traits::Result;
 use crate::ContextForge;
@@ -64,6 +66,8 @@ pub struct ContextForgeBuilder {
     persona_scorer: Option<Arc<dyn LexiconScorer>>,
     #[cfg(feature = "semantic")]
     embedding_cache_dir: Option<std::path::PathBuf>,
+    #[cfg(feature = "semantic")]
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl ContextForgeBuilder {
@@ -78,6 +82,8 @@ impl ContextForgeBuilder {
             persona_scorer: None,
             #[cfg(feature = "semantic")]
             embedding_cache_dir: None,
+            #[cfg(feature = "semantic")]
+            embedder: None,
         }
     }
 
@@ -116,11 +122,34 @@ impl ContextForgeBuilder {
     /// (~22 MB). The model is downloaded automatically on first use; subsequent
     /// starts load from the local cache.
     ///
+    /// This is a convenience wrapper over
+    /// [`with_embedder`](Self::with_embedder) that constructs a [`FasEmbedder`]
+    /// at [`build`](Self::build) time. To reuse one already-loaded model across
+    /// many `ContextForge` instances, or to plug in a different backend, use
+    /// [`with_embedder`](Self::with_embedder) directly.
+    ///
     /// Requires the `semantic` Cargo feature.
+    ///
+    /// [`FasEmbedder`]: crate::semantic::FasEmbedder
     #[cfg(feature = "semantic")]
     #[must_use]
     pub fn with_embedding_model(mut self, cache_dir: impl AsRef<std::path::Path>) -> Self {
         self.embedding_cache_dir = Some(cache_dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Inject an [`Embedder`](crate::semantic::Embedder) for semantic search.
+    ///
+    /// Accepts any implementation as an `Arc<dyn Embedder>`, so a single loaded
+    /// model can be shared across many builds (load once, clone the `Arc`), or a
+    /// custom/remote backend can be supplied. Takes precedence over
+    /// [`with_embedding_model`](Self::with_embedding_model) if both are set.
+    ///
+    /// Requires the `semantic` Cargo feature.
+    #[cfg(feature = "semantic")]
+    #[must_use]
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
         self
     }
 
@@ -162,10 +191,20 @@ impl ContextForgeBuilder {
             engine = engine.with_scorer(scorer);
         }
 
+        // A directly-injected embedder wins; otherwise construct a FasEmbedder
+        // from the configured cache dir if one was set.
         #[cfg(feature = "semantic")]
-        if let Some(cache_dir) = self.embedding_cache_dir {
-            let embedder = crate::semantic::FasEmbedder::new(&cache_dir)?;
-            engine = engine.with_embedder(Arc::new(embedder));
+        {
+            let embedder: Option<Arc<dyn Embedder>> = match self.embedder {
+                Some(e) => Some(e),
+                None => match self.embedding_cache_dir {
+                    Some(cache_dir) => Some(Arc::new(FasEmbedder::new(&cache_dir)?)),
+                    None => None,
+                },
+            };
+            if let Some(embedder) = embedder {
+                engine = engine.with_embedder(embedder);
+            }
         }
 
         Ok(ContextForge::from_parts(engine, scrub_config))

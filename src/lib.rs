@@ -113,6 +113,9 @@ pub use lexicon::{
     LexiconAppender, LexiconConfig, LexiconPatterns, LexiconProposal, LexiconScorer,
 };
 pub use scrub::{scrub_secrets, ScrubConfig};
+pub use semantic::Embedder;
+#[cfg(feature = "semantic")]
+pub use semantic::FasEmbedder;
 pub use session::{group_entries_by_session, SessionGroup};
 pub use storage::{open_storage, TursoSearcher, TursoStorage};
 pub use traits::{ContextStorage, Result, Searcher};

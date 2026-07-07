@@ -8,10 +8,9 @@ use crate::config::{Config, DEFAULT_RECENCY_HALF_LIFE_SECS};
 use crate::entry::ContextEntry;
 use crate::error::Error;
 use crate::lexicon::LexiconScorer;
-use crate::traits::{ContextStorage, Result, Searcher};
-// Bring the Embedder trait into scope for method dispatch on Arc<FasEmbedder>.
 #[cfg(feature = "semantic")]
-use crate::semantic::Embedder as _;
+use crate::semantic::Embedder;
+use crate::traits::{ContextStorage, Result, Searcher};
 
 /// Default candidate limit when fetching search results for assembly.
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -59,7 +58,7 @@ pub struct ContextEngine {
     config: Config,
     scorer: Option<Arc<dyn LexiconScorer>>,
     #[cfg(feature = "semantic")]
-    embedder: Option<Arc<crate::semantic::FasEmbedder>>,
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl ContextEngine {
@@ -105,10 +104,12 @@ impl ContextEngine {
     ///
     /// When set, [`Self::save_snapshot`] generates and stores an embedding for
     /// each new entry, and [`Self::assemble`] blends BM25 and semantic
-    /// candidates via Reciprocal Rank Fusion (RRF, k=60).
+    /// candidates via Reciprocal Rank Fusion (RRF, k=60). Accepts any
+    /// [`Embedder`](crate::semantic::Embedder) implementation, so callers can
+    /// inject a shared instance (load the model once) or an alternate backend.
     #[cfg(feature = "semantic")]
     #[must_use]
-    pub(crate) fn with_embedder(mut self, embedder: Arc<crate::semantic::FasEmbedder>) -> Self {
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
         self
     }

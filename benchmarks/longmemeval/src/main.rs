@@ -19,9 +19,10 @@ mod metrics;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use context_forge::{Config, ContextForge};
+use context_forge::{Config, ContextForge, Embedder, FasEmbedder};
 
 use dataset::Instance;
 use ingest::Ingest;
@@ -121,18 +122,22 @@ fn next(it: &mut impl Iterator<Item = String>, flag: &str) -> anyhow::Result<Str
 
 /// Build a fresh, empty engine for one instance (fresh in-memory DB → per-
 /// instance BM25 statistics and complete isolation).
+///
+/// `shared_embedder` is loaded once by `main` and injected into every instance
+/// via `with_embedder`, so the ONNX model loads a single time for the whole run
+/// (not once per instance).
 async fn build_forge(
     pipeline: Pipeline,
-    embed_dir: &Option<PathBuf>,
+    shared_embedder: &Option<Arc<dyn Embedder>>,
 ) -> anyhow::Result<ContextForge> {
     // Config is #[non_exhaustive] — build from Default, then set fields.
     let mut config = Config::default();
     config.db_path = PathBuf::from(":memory:");
     config.max_entries = 100_000_000; // never evict during a run
-    let require_dir = |embed_dir: &Option<PathBuf>| {
-        embed_dir.clone().ok_or_else(|| {
-            anyhow::anyhow!("--embed-dir (or CF_EMBED_MODEL_DIR) required for this pipeline")
-        })
+    let require_embedder = || {
+        shared_embedder
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("this pipeline requires an embedder (--embed-dir)"))
     };
     let forge = match pipeline {
         Pipeline::Bm25 => ContextForge::open(config).await?,
@@ -144,14 +149,14 @@ async fn build_forge(
         }
         Pipeline::Semantic => {
             ContextForge::builder(config)
-                .with_embedding_model(require_dir(embed_dir)?)
+                .with_embedder(require_embedder()?)
                 .build()
                 .await?
         }
         Pipeline::Full => {
             ContextForge::builder(config)
                 .with_default_english_scorer()
-                .with_embedding_model(require_dir(embed_dir)?)
+                .with_embedder(require_embedder()?)
                 .build()
                 .await?
         }
@@ -206,13 +211,27 @@ async fn main() -> anyhow::Result<()> {
         args.ingest.label(),
     );
 
+    // Load the embedding model ONCE for the whole run (not per instance) and
+    // inject it into every ContextForge via with_embedder. Requires 1c's public
+    // Embedder injection; before it, each instance reloaded the model.
+    let shared_embedder: Option<Arc<dyn Embedder>> = match args.pipeline {
+        Pipeline::Semantic | Pipeline::Full => {
+            let dir = args.embed_dir.clone().ok_or_else(|| {
+                anyhow::anyhow!("--embed-dir (or CF_EMBED_MODEL_DIR) required for this pipeline")
+            })?;
+            eprintln!("  loading embedding model once from {}...", dir.display());
+            Some(Arc::new(FasEmbedder::new(&dir)?))
+        }
+        Pipeline::Bm25 | Pipeline::Lexicon => None,
+    };
+
     let mut overall = Agg::default();
     let mut by_type: BTreeMap<String, Agg> = BTreeMap::new();
     let mut errors = 0usize;
     let mut total = Timing::default();
 
     for (i, inst) in instances.iter().enumerate() {
-        match run_instance(&args, inst).await {
+        match run_instance(&args, inst, &shared_embedder).await {
             Ok((result, timing)) => {
                 total.build += timing.build;
                 total.ingest += timing.ingest;
@@ -255,11 +274,15 @@ struct Timing {
     query: Duration,
 }
 
-async fn run_instance(args: &Args, inst: &Instance) -> anyhow::Result<(InstanceResult, Timing)> {
+async fn run_instance(
+    args: &Args,
+    inst: &Instance,
+    shared_embedder: &Option<Arc<dyn Embedder>>,
+) -> anyhow::Result<(InstanceResult, Timing)> {
     let scope = inst.question_id.as_str();
 
     let t = Instant::now();
-    let forge = build_forge(args.pipeline, &args.embed_dir).await?;
+    let forge = build_forge(args.pipeline, shared_embedder).await?;
     let build = t.elapsed();
 
     let t = Instant::now();
