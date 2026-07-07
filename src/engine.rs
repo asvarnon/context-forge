@@ -76,6 +76,9 @@ impl ContextEngine {
         if !config.recency_half_life_secs.is_finite() || config.recency_half_life_secs <= 0.0 {
             config.recency_half_life_secs = DEFAULT_RECENCY_HALF_LIFE_SECS;
         }
+        if !config.lexicon_boost_clamp.is_finite() || config.lexicon_boost_clamp < 0.0 {
+            config.lexicon_boost_clamp = crate::config::DEFAULT_LEXICON_BOOST_CLAMP;
+        }
 
         Self {
             storage,
@@ -203,7 +206,8 @@ impl ContextEngine {
                     .scorer
                     .as_ref()
                     .map_or(0.0_f32, |s| s.score(&entry, query));
-                let final_score = rrf * decay * (1.0 + f64::from(boost).clamp(-1.0, 2.0));
+                let c = self.config.lexicon_boost_clamp;
+                let final_score = rrf * decay * (1.0 + f64::from(boost).clamp(-c, c));
                 (final_score, entry)
             })
             .collect();
